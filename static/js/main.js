@@ -344,12 +344,10 @@ function drawChart(canvasId, chartData, chartType) {
     const stepX = chartWidth / Math.max(points.length - 1, 1);
     let pointX = index => margin.left + stepX * index;
     let spanMs = 0;
-    let crossDay = false;
     if (points.length >= 2 && times.every(Number.isFinite)) {
         const tMin = Math.min(...times);
         const tMax = Math.max(...times);
         spanMs = tMax - tMin;
-        crossDay = String(points[0].label).slice(0, 10) !== String(points[points.length - 1].label).slice(0, 10);
         if (spanMs > 0) {
             pointX = index => margin.left + (times[index] - tMin) / spanMs * chartWidth;
         }
@@ -416,24 +414,105 @@ function drawChart(canvasId, chartData, chartType) {
     ctx.textAlign = 'right';
     ctx.fillText(`${lastPoint.value.toFixed(2)}`, pointX(lastIndex), Math.max(16, pointY(lastPoint.value) - 12));
 
-    const labelStep = Math.max(1, Math.ceil(points.length / (compact ? 5 : 8)));
+    // X 轴标签：先为每个点生成「文本 + 是否完整日期」，再用实测宽度贪心放置。
+    //
+    // 背景：横轴按真实时间等比分布，服务停跑时会出现大段空洞（如 5 个点里
+    // 中间空了 17 小时），此时两端点位挤在一起。若每个标签都写成
+    // "10/23 19时"（约 55px 宽），相邻标签必然重叠、难以分辨。
+    //
+    // 策略：
+    // 1. 只有「首个点」和「跨天边界」才带日期，同日内只写 "19时"（约 21px）
+    // 2. 用 measureText 实测每段宽度，从右往左贪心放置，会重叠就跳过
+    // 3. 最后一个点（最新数据）必标，且优先保留带日期的形式
+    const LABEL_GAP_X = 6; // 相邻标签之间至少留出的水平间隙
+
+    const buildLabel = (index) => {
+        if (chartType === 'hourly') {
+            const date = new Date(String(points[index].label).replace(' ', 'T'));
+            if (!Number.isFinite(date.getTime())) return { text: '', full: false };
+            const hh = date.getHours();
+            // 跨天时，首个点和换日的那个点带上日期
+            const prev = index > 0
+                ? new Date(String(points[index - 1].label).replace(' ', 'T'))
+                : null;
+            const isDayStart = !prev || !Number.isFinite(prev.getTime())
+                || prev.getDate() !== date.getDate()
+                || prev.getMonth() !== date.getMonth();
+            const text = isDayStart
+                ? (date.getMonth() + 1) + '/' + date.getDate() + ' ' + hh + '时'
+                : hh + '时';
+            return { text, full: isDayStart };
+        }
+        if (chartType === 'monthly') {
+            return { text: String(points[index].label), full: true };
+        }
+        const date = new Date(points[index].label + 'T00:00:00');
+        return Number.isFinite(date.getTime())
+            ? { text: (date.getMonth() + 1) + '/' + date.getDate(), full: false }
+            : { text: '', full: false };
+    };
+
     ctx.fillStyle = p.text;
     ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.textAlign = 'center';
-    points.forEach((point, index) => {
-        if (index % labelStep !== 0 && index !== lastIndex) return;
-        let label;
-        if (chartType === 'hourly') {
-            const date = new Date(String(point.label).replace(' ', 'T'));
-            // 跨自然日时小时数会有歧义，补上日期；同一天内保持简洁的"H:00"
-            label = crossDay
-                ? (date.getMonth() + 1) + '/' + date.getDate() + ' ' + date.getHours() + '时'
-                : date.getHours() + ':00';
-        } else {
-            const date = new Date(point.label + 'T00:00:00');
-            label = (date.getMonth() + 1) + '/' + date.getDate();
+
+    const builtLabels = points.map((_, i) => buildLabel(i));
+    const labelW = builtLabels.map(l => (l.text ? ctx.measureText(l.text).width : 0));
+
+    // 放置顺序：带日期的标签优先（它们是时间轴的锚点），其次从右往左，
+    // 保证最新点在右、且日期锚点不会被同日的纯小时标签挤掉。
+    const order = [];
+    for (let i = points.length - 1; i >= 0; i--) {
+        if (!labelW[i]) continue;
+        if (builtLabels[i].full) order.push(i);
+    }
+    for (let i = points.length - 1; i >= 0; i--) {
+        if (!labelW[i]) continue;
+        if (!builtLabels[i].full) order.push(i);
+    }
+    // 最新点提到最前，确保它一定被放置
+    const lastIdx = points.length - 1;
+    const li = order.indexOf(lastIdx);
+    if (li > 0) {
+        order.splice(li, 1);
+        order.unshift(lastIdx);
+    }
+
+    const keep = new Array(points.length).fill(false);
+    const placed = []; // [{left, right}]
+    order.forEach((i) => {
+        const w = labelW[i];
+        const cx = pointX(i);
+        let left = cx - w / 2;
+        let right = cx + w / 2;
+        // 首尾标签贴边时把文本整体内移，避免被画布边缘裁掉
+        if (left < margin.left - 8) {
+            right += (margin.left - 8) - left;
+            left = margin.left - 8;
+        } else if (right > margin.left + chartWidth + 8) {
+            left -= right - (margin.left + chartWidth + 8);
+            right = margin.left + chartWidth + 8;
         }
-        ctx.fillText(label, pointX(index), margin.top + chartHeight + 24);
+        const collides = placed.some(
+            (p) => !(right + LABEL_GAP_X <= p.left || left >= p.right + LABEL_GAP_X));
+        if (!collides) {
+            keep[i] = true;
+            placed.push({ left, right });
+        }
+    });
+
+    points.forEach((point, index) => {
+        if (!keep[index] || !builtLabels[index].text) return;
+        // 与放置阶段一致：贴边时把文本中心内移
+        const w = labelW[index];
+        const cx = pointX(index);
+        let drawX = cx;
+        if (cx - w / 2 < margin.left - 8) {
+            drawX = margin.left - 8 + w / 2;
+        } else if (cx + w / 2 > margin.left + chartWidth + 8) {
+            drawX = margin.left + chartWidth + 8 - w / 2;
+        }
+        ctx.fillText(builtLabels[index].text, drawX, margin.top + chartHeight + 24);
     });
 }
 
