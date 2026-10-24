@@ -100,7 +100,6 @@
                 <section class="panel prediction-panel">
                     <div class="section-heading">
                         <div>
-                            <p class="section-kicker">FORECAST</p>
                             <h2>电量预测</h2>
                         </div>
                         <button class="btn btn-soft" type="button" onclick="refreshPrediction(event)">
@@ -155,7 +154,6 @@
                 <aside class="panel actions-panel">
                     <div class="section-heading compact">
                         <div>
-                            <p class="section-kicker">QUICK ACTIONS</p>
                             <h2>常用操作</h2>
                         </div>
                     </div>
@@ -203,7 +201,6 @@
             <section class="panel chart-panel">
                 <div class="section-heading chart-heading">
                     <div>
-                        <p class="section-kicker">TREND</p>
                         <h2>电量趋势</h2>
                     </div>
                     <div class="chart-tabs" role="tablist" aria-label="趋势时间范围">
@@ -227,7 +224,6 @@
             <section class="panel chart-panel">
                 <div class="section-heading chart-heading">
                     <div>
-                        <p class="section-kicker">CONSUMPTION</p>
                         <h2>每日用电量</h2>
                         <p>今日为截至最近一次检查的累计用电</p>
                     </div>
@@ -245,7 +241,6 @@
             <section class="panel records-panel">
                 <div class="section-heading">
                     <div>
-                        <p class="section-kicker">HISTORY</p>
                         <h2>最近记录</h2>
                     </div>
                     <span class="record-count">最近 {{ records | length }} 条</span>
@@ -268,7 +263,7 @@
                                 <td>{{ record[1] }}</td>
                                 <td class="amount-cell">{{ "%.2f" | format(record[2] or 0) }} 度</td>
                                 <td>{{ "%.2f" | format(record[4] or 0) }} 度</td>
-                                <td><span class="status-pill">{{ record[5] or '正常' }}</span></td>
+                                <td><span class="status-pill">{{ record[5] | status_label }}</span></td>
                                 <td class="row-action">
                                     <button class="delete-btn" type="button" onclick="deleteRecord({{ record[0] }}, event)">删除</button>
                                 </td>
@@ -286,7 +281,6 @@
             <section class="panel logs-panel" id="logsCard" style="display: none;">
                 <div class="section-heading">
                     <div>
-                        <p class="section-kicker">SYSTEM LOGS</p>
                         <h2>系统日志</h2>
                         <p>用于排查自动检查、登录或邮件发送问题。</p>
                     </div>
@@ -322,7 +316,6 @@
         <div class="modal-content">
             <div class="modal-header">
                 <div>
-                    <p class="section-kicker">PREFERENCES</p>
                     <h2 id="settingsTitle">提醒设置</h2>
                     <p>调整预警阈值、接收邮箱和检查频率。</p>
                 </div>

@@ -38,6 +38,12 @@ def create_app(monitor, reschedule=None):
     def to_json_filter(value):
         return json.dumps(value, ensure_ascii=False)
 
+    # 模板过滤器：把数据库里的记录状态翻译成中文。
+    # 库里存的是 'success' 这类英文枚举（历史 480+ 条，不动数据），只在渲染层翻译。
+    @app.template_filter('status_label')
+    def status_label(value):
+        return STATUS_LABELS.get(str(value).strip().lower(), str(value or '未知'))
+
     # ── 页面 ─────────────────────────────────────────────────────
 
     @app.route('/')
@@ -340,3 +346,12 @@ PREDICTION_ACCURACY_EVALUATION = {getattr(config, 'PREDICTION_ACCURACY_EVALUATIO
 
 EMAIL_PATTERN = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
 LOG_PATTERN = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - (\w+) - (.+)'
+
+# 记录状态的中文显示（库内存英文枚举，仅渲染时翻译；未收录的值原样显示）
+STATUS_LABELS = {
+    'success': '成功',
+    'failed': '失败',
+    'fail': '失败',
+    'error': '出错',
+    'pending': '等待中',
+}
