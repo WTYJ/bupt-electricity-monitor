@@ -54,7 +54,6 @@
                 <article class="stat-card stat-card-primary">
                     <div class="stat-card-head">
                         <span>剩余电量</span>
-                        <span class="balance-indicator" aria-hidden="true"></span>
                     </div>
                     <div class="stat-value">
                         <strong id="current-balance">{% if stats.latest and stats.latest[2] is not none %}{{ "%.2f" | format(stats.latest[2]) }}{% else %}--{% endif %}</strong>
@@ -66,7 +65,6 @@
                 <article class="stat-card">
                     <div class="stat-card-head">
                         <span>日均用量</span>
-                        <span class="metric-chip">7 DAYS</span>
                     </div>
                     <div class="stat-value">
                         <strong id="usage-avg-7d">{{ "%.2f" | format(stats.usage_avg_7d or 0) }}</strong>
@@ -78,7 +76,6 @@
                 <article class="stat-card">
                     <div class="stat-card-head">
                         <span>本月用量</span>
-                        <span class="metric-chip">MONTH</span>
                     </div>
                     <div class="stat-value">
                         <strong id="month-usage">{{ "%.2f" | format(stats.month_usage or 0) }}</strong>
@@ -90,7 +87,6 @@
                 <article class="stat-card">
                     <div class="stat-card-head">
                         <span>实时功率</span>
-                        <span class="metric-chip">LIVE</span>
                     </div>
                     <div class="stat-value">
                         <strong id="current-power">{% if stats.current_power is not none %}{{ "%.2f" | format(stats.current_power) }}{% else %}--{% endif %}</strong>
