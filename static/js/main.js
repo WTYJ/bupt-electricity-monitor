@@ -531,32 +531,45 @@ function drawDailyUsageChart() {
         ctx.fill();
     });
 
-    // 数值与日期标注密度按每根柱子的可用宽度决定：放得下就每天都标
-    const valueStep = Math.max(1, Math.ceil(38 / slot));
+    // 数值与日期标注密度：用 canvas 实测文字宽度 + 最小间隙来判断能否每天都标，
+    // 而不是猜固定像素阈值（高分屏/不同字号下固定值会误判，导致柱宽够却隔天标）
+    const LABEL_GAP = 6; // 相邻标注之间至少留出的视觉间隙
+
     ctx.font = '600 10px -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillStyle = p.text;
+    // 取最长数值的宽度（如 "16.9"）作为单条数值标注的占位宽度
+    const widestValue = points.reduce(
+        (max, pt) => Math.max(max, ctx.measureText(pt.value.toFixed(1)).width), 0);
+    const valueNeeded = widestValue + LABEL_GAP;
+    const valueStep = Math.max(1, Math.ceil(valueNeeded / slot));
+
     points.forEach((point, index) => {
         if (index % valueStep !== 0 && index !== n - 1) return;
         const x = margin.left + slot * index + slot / 2;
         ctx.fillText(point.value.toFixed(1), x, pointY(point.value) - 6);
     });
 
-    // X轴日期标签：M/D，最后一根标"今日"
-    const dateStep = Math.max(1, Math.ceil(30 / slot));
+    // X轴日期标签：M/D，最后一根标"今日"；同样用实测宽度决定密度
     ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.fillStyle = p.text;
+    const dateLabels = points.map((point, index) => {
+        if (index === n - 1) return '今日';
+        const date = new Date(point.label + 'T00:00:00');
+        return Number.isFinite(date.getTime())
+            ? (date.getMonth() + 1) + '/' + date.getDate()
+            : '';
+    });
+    const widestDate = dateLabels.reduce(
+        (max, label) => Math.max(max, label ? ctx.measureText(label).width : 0), 0);
+    const dateNeeded = widestDate + LABEL_GAP;
+    const dateStep = Math.max(1, Math.ceil(dateNeeded / slot));
+
     points.forEach((point, index) => {
         if (index % dateStep !== 0 && index !== n - 1) return;
         const x = margin.left + slot * index + slot / 2;
-        if (index === n - 1) {
-            ctx.fillText('今日', x, margin.top + chartHeight + 24);
-            return;
-        }
-        const date = new Date(point.label + 'T00:00:00');
-        if (Number.isFinite(date.getTime())) {
-            ctx.fillText((date.getMonth() + 1) + '/' + date.getDate(), x, margin.top + chartHeight + 24);
-        }
+        const label = dateLabels[index];
+        if (label) ctx.fillText(label, x, margin.top + chartHeight + 24);
     });
 }
 
