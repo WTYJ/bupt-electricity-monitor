@@ -1,0 +1,22 @@
+# 配置文件（含明文密码，绝不入库）
+config.py
+config.py.backup
+
+# Python
+*.pyc
+__pycache__/
+venv/
+.env
+
+# 运行产物
+*.log
+*.db
+
+# 系统
+.DS_Store
+
+# 本地 git 历史备份（重建历史时用，绝不入库）
+.git.backup/
+
+# 本地 git 备份（重建历史时用，绝不入库）
+.git.backup*/

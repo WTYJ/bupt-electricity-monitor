@@ -1,0 +1,50 @@
+# 配置文件示例 - 复制为config.py并填写实际信息
+# 也可以运行 python setup_config.py 使用配置向导自动生成
+
+# 北邮统一身份认证用户名和密码
+BUPT_USERNAME = "你的学号"        # 例如: "2021000000"
+BUPT_PASSWORD = "你的密码"        # 你的统一身份认证密码
+
+# 宿舍信息配置（推荐运行 python setup_config.py 自动查询，不要手抄他人配置）
+# 校区: 1=西土城, 2=沙河
+AREA_ID = 1                      # 校区ID：1=西土城，2=沙河
+# 公寓楼ID（需要查询具体楼ID）
+APARTMENT_ID = "你的公寓楼ID"     # 由查询工具返回的 32 位十六进制串
+# 楼层
+FLOOR_ID = "你的楼层"
+# 房间编号
+ROOM_NUMBER = "你的房间号"
+# 公寓名称校验（防止接口偶发返回其他房间的数据污染记录）
+EXPECTED_APARTMENT_NAME = "你的公寓名"
+
+# 邮件发送配置
+EMAIL_SMTP_SERVER = "smtp.qq.com"  # QQ邮箱SMTP服务器
+EMAIL_SMTP_PORT = 587               # SMTP端口
+EMAIL_USERNAME = "你的邮箱@qq.com"   # 发送邮件的QQ邮箱
+EMAIL_PASSWORD = "你的邮箱授权码"     # QQ邮箱授权码（不是QQ密码！）
+ALERT_EMAILS = ['你的接收邮箱@qq.com']  # 接收预警邮件的邮箱列表
+
+# 电量预警阈值（度）：低于此值发邮件，页面显示/横幅/预测预警均使用此值
+LOW_BALANCE_THRESHOLD = 10.0
+
+# 检查频率（分钟）：设置后按此间隔检查；删除此行则每小时整点检查
+# CHECK_FREQUENCY_MINUTES = 30
+
+# Web服务配置
+WEB_HOST = "0.0.0.0"  # 监听所有网络接口，只想本机访问改成 "127.0.0.1"
+WEB_PORT = 5100       # Web服务端口
+DEBUG_MODE = False    # 调试模式（保持False，True会导致调度器重复运行）
+
+# 如果使用其他邮箱，请修改对应的SMTP设置：
+# Gmail: smtp.gmail.com, 587
+# 163邮箱: smtp.163.com, 25
+# 126邮箱: smtp.126.com, 25
+
+# 预测系统配置
+PREDICTION_ALERT_DAYS = 7  # 提前多少天发送预测预警
+PREDICTION_LOOKBACK_DAYS = 30  # 历史数据总窗口上限（回退用的最长窗口）
+PREDICTION_MAX_DAILY_RATE = 50.0  # 单个记录间隔折算日耗超过此值视为异常丢弃（度/天）
+PREDICTION_RECENT_WINDOW_DAYS = 3  # 主窗口（天）：优先只看最近 N 天的用电速率
+PREDICTION_MIN_SAMPLES = 12  # 主窗口内至少要有这么多区间，否则自动放宽窗口
+PREDICTION_MIN_OBSERVED_DAYS = 0.5  # 有效观测时长下限（天），低于此值不预测
+PREDICTION_ACCURACY_EVALUATION = True  # 是否启用预测准确性评估

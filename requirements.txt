@@ -1,0 +1,6 @@
+# 实际运行环境已验证的版本（Windows + Python 3.11.9）
+# 用 >= 下限而不是 == 钉子：本项目非生产级，避免新版安全修复被挡住
+Flask>=3.0
+requests>=2.31
+beautifulsoup4>=4.12
+APScheduler>=3.10

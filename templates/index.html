@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#312e81">
+    <title>北邮宿舍电费监控</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+    <script>
+    (function () {
+        try {
+            var t = localStorage.getItem('theme');
+            if (t !== 'light' && t !== 'dark') {
+                t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            }
+            document.documentElement.setAttribute('data-theme', t);
+        } catch (e) { document.documentElement.setAttribute('data-theme', 'light'); }
+    })();
+</script>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <div class="container">
+        <header class="hero">
+            <div class="hero-topline">
+                <div class="brand-lockup">
+                    <span class="brand-mark" aria-hidden="true">⚡</span>
+                    <div>
+                        <p class="eyebrow">北邮电费自动提醒</p>
+                        <h1>宿舍电费监控</h1>
+                    </div>
+                </div>
+                <div class="topline-right">
+                    <div class="schedule-badge">
+                        <span class="status-dot" aria-hidden="true"></span>
+                        <span id="schedule-label">{{ schedule_label }}</span>
+                    </div>
+                    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="切换深色模式" title="切换深色 / 浅色模式">🌙</button>
+                </div>
+            </div>
+
+        </header>
+
+        {% if stats.latest and stats.latest[2] is not none and stats.prediction.threshold and stats.latest[2] < stats.prediction.threshold %}
+        <div class="alert-banner is-visible" id="lowBalanceBanner">⚠️ 剩余电量 {{ "%.1f" | format(stats.latest[2]) }} 度，已低于预警阈值 {{ stats.prediction.threshold }} 度，请及时充值！</div>
+        {% else %}
+        <div class="alert-banner" id="lowBalanceBanner" style="display:none">⚠️ 剩余电量不足，请及时充值！</div>
+        {% endif %}
+
+        <main>
+            <section class="stats-grid" aria-label="电费概览">
+                <article class="stat-card stat-card-primary">
+                    <div class="stat-card-head">
+                        <span>剩余电量</span>
+                        <span class="balance-indicator" aria-hidden="true"></span>
+                    </div>
+                    <div class="stat-value">
+                        <strong id="current-balance">{% if stats.latest and stats.latest[2] is not none %}{{ "%.2f" | format(stats.latest[2]) }}{% else %}--{% endif %}</strong>
+                        <small>度</small>
+                    </div>
+                    <p>{% if stats.free_pool %}含学校赠送 {{ "%.1f" | format(stats.free_pool) }} 度{% if stats.last_grant %}（{{ stats.last_grant.time[5:10] }} 到账）{% endif %}{% else %}低于设定阈值后自动发送邮件{% endif %}</p>
+                </article>
+
+                <article class="stat-card">
+                    <div class="stat-card-head">
+                        <span>日均用量</span>
+                        <span class="metric-chip">7 DAYS</span>
+                    </div>
+                    <div class="stat-value">
+                        <strong id="usage-avg-7d">{{ "%.2f" | format(stats.usage_avg_7d or 0) }}</strong>
+                        <small>度</small>
+                    </div>
+                    <p>按近7天实际观测折算{% if stats.observed_days_7d %}，已观测约{{ stats.observed_days_7d }}天{% endif %}</p>
+                </article>
+
+                <article class="stat-card">
+                    <div class="stat-card-head">
+                        <span>本月用量</span>
+                        <span class="metric-chip">MONTH</span>
+                    </div>
+                    <div class="stat-value">
+                        <strong id="month-usage">{{ "%.2f" | format(stats.month_usage or 0) }}</strong>
+                        <small>度</small>
+                    </div>
+                    <p>持续积累本月用电记录</p>
+                </article>
+
+                <article class="stat-card">
+                    <div class="stat-card-head">
+                        <span>实时功率</span>
+                        <span class="metric-chip">LIVE</span>
+                    </div>
+                    <div class="stat-value">
+                        <strong id="current-power">{% if stats.current_power is not none %}{{ "%.2f" | format(stats.current_power) }}{% else %}--{% endif %}</strong>
+                        <small>kW</small>
+                    </div>
+                    <p>电表有功功率，每次检查后刷新</p>
+                </article>
+            </section>
+
+            <div class="dashboard-grid">
+                <section class="panel prediction-panel">
+                    <div class="section-heading">
+                        <div>
+                            <p class="section-kicker">FORECAST</p>
+                            <h2>电量预测</h2>
+                        </div>
+                        <button class="btn btn-soft" type="button" onclick="refreshPrediction(event)">
+                            <span class="spinner" aria-hidden="true"></span>
+                            <span class="btn-text">重新计算</span>
+                        </button>
+                    </div>
+
+                    <div class="forecast-summary">
+                        <div>
+                            <span class="forecast-label">预计还能使用</span>
+                            <strong id="prediction-days" class="forecast-days {% if stats.prediction.days_remaining is not none and stats.prediction.days_remaining <= 3 %}text-danger{% elif stats.prediction.days_remaining is not none and stats.prediction.days_remaining <= 7 %}text-warning{% endif %}">
+                                {% if stats.prediction.days_remaining is not none %}{{ "%.1f" | format(stats.prediction.days_remaining) }}天{% else %}--{% endif %}
+                            </strong>
+                        </div>
+                        <div class="forecast-date">
+                            <span>预计到达预警线</span>
+                            <strong id="prediction-date">{{ stats.prediction.predicted_date or '--' }}</strong>
+                        </div>
+                    </div>
+
+                    <div class="prediction-metrics">
+                        <div class="prediction-item">
+                            <span class="prediction-label">预警阈值</span>
+                            <strong id="prediction-threshold">{{ "%.1f" | format(stats.prediction.threshold or 10.0) }}度</strong>
+                        </div>
+                        <div class="prediction-item">
+                            <span class="prediction-label">估计日均</span>
+                            <strong id="prediction-rate">{{ "%.2f" | format(stats.prediction.daily_usage_avg or 0) }}度</strong>
+                        </div>
+                        <div class="prediction-item">
+                            <span class="prediction-label">已观测</span>
+                            <strong id="prediction-observed">{% if stats.prediction.data_points and stats.prediction.data_points.observed_days %}{{ stats.prediction.data_points.observed_days }}天{% else %}--{% endif %}</strong>
+                        </div>
+                        <div class="prediction-item">
+                            <span class="prediction-label">最近更新</span>
+                            <strong id="last-update">{% if stats.latest and stats.latest[1] %}{{ stats.latest[1] }}{% else %}--{% endif %}</strong>
+                        </div>
+                        <div class="prediction-item">
+                            <span class="prediction-label">上次充值</span>
+                            <strong id="last-recharge">{% if stats.last_recharge %}{{ stats.last_recharge.time[5:10] }} 充{{ stats.last_recharge.amount }}度{% else %}--{% endif %}</strong>
+                        </div>
+                        <div class="prediction-item">
+                            <span class="prediction-label">预测方式</span>
+                            <strong id="prediction-method">
+                                近{{ stats.prediction.window_days or 3 }}天{% if stats.prediction.prediction_method == 'extended' %}（已放宽）{% endif %} · 可信度{% if stats.prediction.prediction_confidence == 'high' %}高{% elif stats.prediction.prediction_confidence == 'medium' %}中{% else %}低{% endif %}
+                            </strong>
+                        </div>
+                    </div>
+                </section>
+
+                <aside class="panel actions-panel">
+                    <div class="section-heading compact">
+                        <div>
+                            <p class="section-kicker">QUICK ACTIONS</p>
+                            <h2>常用操作</h2>
+                        </div>
+                    </div>
+
+                    <div class="action-list">
+                        <button class="action-item action-primary" type="button" onclick="checkNow(event)">
+                            <span class="action-symbol" aria-hidden="true">↻</span>
+                            <span class="action-copy">
+                                <strong class="btn-text">立即检查</strong>
+                                <small>从北邮系统同步最新电量</small>
+                            </span>
+                            <span class="spinner" aria-hidden="true"></span>
+                        </button>
+
+                        <button class="action-item" type="button" onclick="openSettings()">
+                            <span class="action-symbol" aria-hidden="true">⚙</span>
+                            <span class="action-copy">
+                                <strong class="btn-text">提醒设置</strong>
+                                <small>调整阈值、邮箱和频率</small>
+                            </span>
+                        </button>
+                        <a class="action-item" href="https://app.bupt.edu.cn/buptdf/wap/default/chong" target="_blank" rel="noopener noreferrer">
+                            <span class="action-symbol" aria-hidden="true">↗</span>
+                            <span class="action-copy">
+                                <strong>前往充值</strong>
+                                <small>打开北邮电费充值页面</small>
+                            </span>
+                        </a>
+                        <button class="action-item" type="button" onclick="toggleLogs(event)">
+                            <span class="action-symbol" aria-hidden="true">⌘</span>
+                            <span class="action-copy">
+                                <strong class="btn-text">查看日志</strong>
+                                <small>检查自动任务运行情况</small>
+                            </span>
+                        </button>
+                    </div>
+
+                    <button class="danger-link" type="button" onclick="clearAllRecords(event)">
+                        <span class="spinner" aria-hidden="true"></span>
+                        <span class="btn-text">清空全部历史记录</span>
+                    </button>
+                </aside>
+            </div>
+
+            <section class="panel chart-panel">
+                <div class="section-heading chart-heading">
+                    <div>
+                        <p class="section-kicker">TREND</p>
+                        <h2>电量趋势</h2>
+                    </div>
+                    <div class="chart-tabs" role="tablist" aria-label="趋势时间范围">
+                        <button class="chart-tab" type="button" onclick="switchChart('hourly')" data-chart="hourly">24 小时</button>
+                        <button class="chart-tab active" type="button" onclick="switchChart('daily')" data-chart="daily">7 天</button>
+                        <button class="chart-tab" type="button" onclick="switchChart('monthly')" data-chart="monthly">30 天</button>
+                    </div>
+                </div>
+
+                <div class="chart-container" id="hourlyChartContainer" style="display: none;">
+                    <canvas id="hourlyChart"></canvas>
+                </div>
+                <div class="chart-container" id="dailyChartContainer">
+                    <canvas id="dailyChart"></canvas>
+                </div>
+                <div class="chart-container" id="monthlyChartContainer" style="display: none;">
+                    <canvas id="monthlyChart"></canvas>
+                </div>
+            </section>
+
+            <section class="panel chart-panel">
+                <div class="section-heading chart-heading">
+                    <div>
+                        <p class="section-kicker">CONSUMPTION</p>
+                        <h2>每日用电量</h2>
+                        <p>今日为截至最近一次检查的累计用电</p>
+                    </div>
+                    <div class="chart-tabs" role="tablist" aria-label="每日用量时间范围">
+                        <button class="chart-tab active" type="button" onclick="switchDailyUsageRange(7)" data-durange="7">近 7 天</button>
+                        <button class="chart-tab" type="button" onclick="switchDailyUsageRange(15)" data-durange="15">近 15 天</button>
+                        <button class="chart-tab" type="button" onclick="switchDailyUsageRange(30)" data-durange="30">近 30 天</button>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="dailyUsageChart"></canvas>
+                </div>
+            </section>
+
+            <section class="panel records-panel">
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">HISTORY</p>
+                        <h2>最近记录</h2>
+                    </div>
+                    <span class="record-count">最近 {{ records | length }} 条</span>
+                </div>
+
+                <div class="table-wrap">
+                    <table class="records-table">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>剩余电量</th>
+                                <th>本月用量</th>
+                                <th>状态</th>
+                                <th><span class="sr-only">操作</span></th>
+                            </tr>
+                        </thead>
+                        <tbody id="records-tbody">
+                            {% for record in records %}
+                            <tr>
+                                <td>{{ record[1] }}</td>
+                                <td class="amount-cell">{{ "%.2f" | format(record[2] or 0) }} 度</td>
+                                <td>{{ "%.2f" | format(record[4] or 0) }} 度</td>
+                                <td><span class="status-pill">{{ record[5] or '正常' }}</span></td>
+                                <td class="row-action">
+                                    <button class="delete-btn" type="button" onclick="deleteRecord({{ record[0] }}, event)">删除</button>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td class="empty-table" colspan="5">还没有检查记录，点击“立即检查”获取第一条数据。</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel logs-panel" id="logsCard" style="display: none;">
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">SYSTEM LOGS</p>
+                        <h2>系统日志</h2>
+                        <p>用于排查自动检查、登录或邮件发送问题。</p>
+                    </div>
+                </div>
+                <div class="log-controls">
+                    <button class="btn btn-soft" type="button" onclick="refreshLogs(event)">
+                        <span class="spinner" aria-hidden="true"></span>
+                        <span class="btn-text">刷新日志</span>
+                    </button>
+                    <select id="logLevel" onchange="filterLogs()" aria-label="日志级别">
+                        <option value="all">所有级别</option>
+                        <option value="INFO">信息</option>
+                        <option value="WARNING">警告</option>
+                        <option value="ERROR">错误</option>
+                    </select>
+                    <input type="number" id="logLimit" value="50" min="10" max="500" step="1" onchange="refreshLogs(event)" aria-label="显示日志条数">
+                    <button class="btn btn-danger-soft" type="button" onclick="clearLogs(event)">
+                        <span class="spinner" aria-hidden="true"></span>
+                        <span class="btn-text">清空日志</span>
+                    </button>
+                </div>
+                <div class="log-container">
+                    <div id="log-content" class="log-content">
+                        <div class="log-loading">正在加载日志...</div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+    </div>
+
+    <div id="settingsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <p class="section-kicker">PREFERENCES</p>
+                    <h2 id="settingsTitle">提醒设置</h2>
+                    <p>调整预警阈值、接收邮箱和检查频率。</p>
+                </div>
+                <button class="modal-close" type="button" onclick="closeSettings()" aria-label="关闭设置">×</button>
+            </div>
+            <!-- novalidate：阈值允许手动输入小数，步进按钮由 step=1 控制，避免浏览器原生校验拦截保存 -->
+            <form id="settingsForm" novalidate>
+                <div class="form-group">
+                    <label for="threshold">电量阈值</label>
+                    <div class="input-with-unit">
+                        <input type="number" id="threshold" name="threshold" step="1" min="0" value="10.00">
+                        <span>度</span>
+                    </div>
+                    <small>剩余电量低于此数值时发送提醒邮件。</small>
+                </div>
+                <div class="form-group">
+                    <label for="emails">提醒邮箱</label>
+                    <textarea id="emails" name="emails" placeholder="每行输入一个邮箱地址"></textarea>
+                    <small>支持添加多个邮箱，每行填写一个。</small>
+                </div>
+                <div class="form-group">
+                    <label for="checkFrequency">检查频率</label>
+                    <div class="input-with-unit">
+                        <input type="number" id="checkFrequency" name="checkFrequency" min="5" max="1440" value="30">
+                        <span>分钟</span>
+                    </div>
+                    <small>设置自动检查剩余电量的时间间隔。</small>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-ghost" onclick="closeSettings()">取消</button>
+                    <button type="submit" class="btn btn-primary">
+                        <span class="spinner" aria-hidden="true"></span>
+                        <span class="btn-text">保存设置</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="chartData"
+         data-hourly='{{ (stats.balance_trend_hourly | tojsonfilter) | safe if (stats.balance_trend_hourly) else "[]" }}'
+         data-daily='{{ (stats.balance_trend_daily | tojsonfilter) | safe if (stats.balance_trend_daily) else "[]" }}'
+         data-daily-usage='{{ (stats.daily_usage | tojsonfilter) | safe if (stats.daily_usage) else "[]" }}'
+         hidden>
+    </div>
+
+    <script src="/static/js/main.js"></script>
+</body>
+</html>
