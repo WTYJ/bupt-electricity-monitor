@@ -51,24 +51,6 @@ def init_db():
                 sent BOOLEAN DEFAULT 0
             )
         ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS prediction_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                current_balance REAL NOT NULL,
-                threshold REAL NOT NULL,
-                predicted_days REAL,
-                predicted_date TEXT,
-                daily_avg REAL,
-                weekday_avg REAL,
-                weekend_avg REAL,
-                prediction_method TEXT,
-                confidence TEXT,
-                actual_days REAL,
-                accuracy_score REAL,
-                is_evaluated INTEGER DEFAULT 0
-            )
-        ''')
     backfill_balance_with_free_pool()
 
 
@@ -232,11 +214,10 @@ def max_record_timestamp():
 
 
 def clear_all_records():
-    """清空三张业务表"""
+    """清空两张业务表（记录与预警）"""
     with _connect() as conn:
         conn.execute('DELETE FROM electric_records')
         conn.execute('DELETE FROM alerts')
-        conn.execute('DELETE FROM prediction_records')
 
 
 def delete_record(record_id):
@@ -267,133 +248,3 @@ def record_alert(alert_type, message, sent=1):
             INSERT INTO alerts (alert_type, message, sent)
             VALUES (?, ?, ?)
         ''', (alert_type, message, sent))
-
-
-# ── prediction_records ────────────────────────────────────────────
-
-def save_prediction_record(prediction):
-    """保存预测记录用于后续准确性评估"""
-    with _connect() as conn:
-        conn.execute('''
-            INSERT INTO prediction_records
-            (timestamp, current_balance, threshold, predicted_days, predicted_date,
-             daily_avg, weekday_avg, weekend_avg, prediction_method, confidence)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            prediction.get('current_balance', 0),
-            prediction.get('threshold', 10),
-            # 准确率评估的基准是"实际降到阈值以下的时间"，因此存 days_to_threshold
-            prediction.get('days_to_threshold'),
-            prediction.get('predicted_date'),
-            prediction.get('daily_usage_avg', 0),
-            prediction.get('weekday_avg', 0),
-            prediction.get('weekend_avg', 0),
-            prediction.get('prediction_method', 'recent'),
-            prediction.get('prediction_confidence', 'low')
-        ))
-
-
-def evaluate_prediction_accuracy():
-    """
-    评估历史预测的准确性：对未评估的预测记录，回看实际到达阈值的时间并打分
-
-    Returns:
-        dict: 预测准确性统计（与旧版 app.py 输出结构一致）
-    """
-    try:
-        with _connect() as conn:
-            unevaluated = conn.execute('''
-                SELECT id, timestamp, current_balance, threshold, predicted_days,
-                       predicted_date, prediction_method
-                FROM prediction_records
-                WHERE is_evaluated = 0 AND predicted_days IS NOT NULL
-                ORDER BY timestamp ASC
-            ''').fetchall()
-
-            evaluated_count = 0
-            for (pred_id, pred_timestamp, _balance, threshold,
-                 predicted_days, _predicted_date, _method) in unevaluated:
-                actual = conn.execute('''
-                    SELECT timestamp FROM electric_records
-                    WHERE timestamp > ? AND balance <= ?
-                    ORDER BY timestamp ASC
-                    LIMIT 1
-                ''', (pred_timestamp, threshold)).fetchone()
-
-                if not actual:
-                    continue
-
-                pred_dt = datetime.strptime(pred_timestamp, '%Y-%m-%d %H:%M:%S')
-                actual_dt = datetime.strptime(actual[0], '%Y-%m-%d %H:%M:%S')
-                actual_days = (actual_dt - pred_dt).total_seconds() / (24 * 3600)
-
-                if predicted_days > 0:
-                    error_ratio = abs(actual_days - predicted_days) / predicted_days
-                    accuracy_score = max(0, 100 - error_ratio * 100)
-                else:
-                    accuracy_score = 0
-
-                conn.execute('''
-                    UPDATE prediction_records
-                    SET actual_days = ?, accuracy_score = ?, is_evaluated = 1
-                    WHERE id = ?
-                ''', (actual_days, accuracy_score, pred_id))
-                evaluated_count += 1
-
-            method_stats = conn.execute('''
-                SELECT
-                    prediction_method,
-                    COUNT(*) as total_predictions,
-                    AVG(accuracy_score) as avg_accuracy,
-                    MIN(accuracy_score) as min_accuracy,
-                    MAX(accuracy_score) as max_accuracy,
-                    COUNT(CASE WHEN accuracy_score >= 80 THEN 1 END) as high_accuracy_count
-                FROM prediction_records
-                WHERE is_evaluated = 1 AND accuracy_score IS NOT NULL
-                GROUP BY prediction_method
-            ''').fetchall()
-
-            overall = conn.execute('''
-                SELECT
-                    COUNT(*) as total_evaluated,
-                    AVG(accuracy_score) as overall_accuracy,
-                    COUNT(CASE WHEN accuracy_score >= 80 THEN 1 END) as high_accuracy_total
-                FROM prediction_records
-                WHERE is_evaluated = 1 AND accuracy_score IS NOT NULL
-            ''').fetchone()
-
-        total = overall[0] if overall else 0
-        result = {
-            'success': True,
-            'evaluated_count': evaluated_count,
-            'overall_stats': {
-                'total_predictions': total,
-                'average_accuracy': round(overall[1], 2) if overall and overall[1] else 0,
-                'high_accuracy_rate': round((overall[2] / total * 100), 2) if total > 0 else 0
-            },
-            'method_stats': []
-        }
-        for method, m_total, avg_acc, min_acc, max_acc, high_acc_count in method_stats:
-            result['method_stats'].append({
-                'method': method,
-                'total_predictions': m_total,
-                'average_accuracy': round(avg_acc, 2) if avg_acc else 0,
-                'min_accuracy': round(min_acc, 2) if min_acc else 0,
-                'max_accuracy': round(max_acc, 2) if max_acc else 0,
-                'high_accuracy_rate': round((high_acc_count / m_total * 100), 2) if m_total > 0 else 0
-            })
-
-        if evaluated_count > 0:
-            logging.info(f"预测准确性评估完成，评估了{evaluated_count}个预测记录")
-        return result
-
-    except Exception as e:
-        logging.error(f"评估预测准确性失败: {str(e)}")
-        return {
-            'success': False,
-            'message': f'评估失败: {str(e)}',
-            'evaluated_count': 0,
-            'overall_stats': {'total_predictions': 0, 'average_accuracy': 0, 'high_accuracy_rate': 0},
-            'method_stats': []
-        }

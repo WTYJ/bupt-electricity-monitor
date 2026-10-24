@@ -47,4 +47,3 @@ PREDICTION_MAX_DAILY_RATE = 50.0  # 单个记录间隔折算日耗超过此值�
 PREDICTION_RECENT_WINDOW_DAYS = 3  # 主窗口（天）：优先只看最近 N 天的用电速率
 PREDICTION_MIN_SAMPLES = 12  # 主窗口内至少要有这么多区间，否则自动放宽窗口
 PREDICTION_MIN_OBSERVED_DAYS = 0.5  # 有效观测时长下限（天），低于此值不预测
-PREDICTION_ACCURACY_EVALUATION = True  # 是否启用预测准确性评估

@@ -418,8 +418,8 @@ class ElectricMonitor:
         """选择预测窗口：优先最短窗口，样本不足时逐级放宽。
 
         动机：宿舍用电受气温/空调驱动，用电状态变化很快（如降温后停用空调）。
-        用 30 天均值会把历史上的高耗时段也算进平均，高估消耗、低估可用天数。
-        实测：近 3 天日均 5.16 度，30 天均值 10.44 度，差一倍。
+        用 30 天均值会把历史上的高耗时段也算进平均，高估消耗、低估可用天数
+        （实测短窗口日均仅为 30 天均值的约六折）。
 
         候选窗口按「主窗口 → 2× → 4× → 全窗口」逐级放宽，
         取第一个满足「区间数 ≥ PREDICTION_MIN_SAMPLES 且观测时长 ≥
@@ -472,7 +472,7 @@ class ElectricMonitor:
 
         Returns:
             dict: prediction_method 字段为 'recent'（主窗口）或
-            'extended'（放宽后的窗口），供准确率评估分组使用
+            'extended'（样本不足、已放宽窗口）
         """
         try:
             if threshold is None:
@@ -621,7 +621,7 @@ class ElectricMonitor:
 
 
 def run_check(monitor):
-    """执行一次完整的电费检查：采集 → 入库 → 按需预警 → 预测记录与评估。
+    """执行一次完整的电费检查：采集 → 入库 → 按需预警（低余额 + 预测）。
 
     手动检查（/api/check）与定时任务共用这一条流程，避免两处重复逻辑各自漂移。
 
@@ -641,20 +641,14 @@ def run_check(monitor):
     if balance < threshold:
         notifier.send_low_balance_alert(balance, threshold)
 
-    # 预测预警与准确率评估
+    # 预测预警
     prediction = monitor.predict(threshold)
-    evaluate_enabled = getattr(config, 'PREDICTION_ACCURACY_EVALUATION', True)
-    if evaluate_enabled and prediction.get('success'):
-        storage.save_prediction_record(prediction)
 
     alert_days = int(getattr(config, 'PREDICTION_ALERT_DAYS', 7))
     if (prediction.get('success') and
             prediction.get('days_to_threshold') is not None and
             prediction.get('days_to_threshold') <= alert_days):
         notifier.send_prediction_alert(prediction, alert_days)
-
-    if evaluate_enabled:
-        storage.evaluate_prediction_accuracy()
 
     logging.info(f"检查完成 - 剩余电量: {balance}度")
     return {'data': data, 'prediction': prediction}

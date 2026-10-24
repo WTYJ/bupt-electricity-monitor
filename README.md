@@ -76,7 +76,6 @@ PREDICTION_MAX_DAILY_RATE = 50.0              # 单区间折算日耗超此值�
 PREDICTION_RECENT_WINDOW_DAYS = 3             # 主窗口：优先只看最近 N 天
 PREDICTION_MIN_SAMPLES = 12                   # 主窗口区间数下限，不足则放宽窗口
 PREDICTION_MIN_OBSERVED_DAYS = 0.5            # 有效观测时长下限（天），低于此值不预测
-PREDICTION_ACCURACY_EVALUATION = True         # 是否评估预测准确率
 ```
 
 > **`DEBUG_MODE` 必须保持 `False`**：为 `True` 时 Flask reloader 会重启进程，
@@ -112,8 +111,7 @@ PREDICTION_ACCURACY_EVALUATION = True         # 是否评估预测准确率
 | GET | `/api/version` | 轻量版本探针，仅返回最新记录时间戳 |
 | GET | `/api/records?limit=N` | 历史记录 |
 | POST | `/api/check` | 立即检查（会真实登录并查询学校接口） |
-| GET | `/api/prediction?threshold=N` | 重算预测（**不入库**，避免污染准确率统计） |
-| GET | `/api/prediction/accuracy` | 预测准确率统计（`/api/prediction/analytics` 为同义路由） |
+| GET | `/api/prediction?threshold=N` | 即时重算预测（无副作用，不写库） |
 | GET | `/api/config` | 读取可编辑配置 |
 | POST | `/api/config` | 保存配置并重新调度 |
 | GET | `/api/logs?limit=N&level=all` | 日志（容错非 UTF-8 历史行） |
@@ -135,7 +133,7 @@ PREDICTION_ACCURACY_EVALUATION = True         # 是否评估预测准确率
 25/50/75/100/150/200 度，`snap_recharge_amount()` 向上取最近档。
 
 **预测语义**：`days_remaining` = 电量**耗尽**天数；`days_to_threshold` = 降到阈值天数
-（预警邮件与准确率评估用它）；`predicted_date` = 到阈值日期；`window_days` = 实际使用的窗口天数。
+（预测预警邮件用它触发）；`predicted_date` = 到阈值日期；`window_days` = 实际使用的窗口天数。
 
 **窗口策略**：优先只看最近 3 天的用电速率（简单时间加权：总消耗 ÷ 总天数）。
 若该窗口区间数不足 12 条或观测不到 0.5 天（停服、刚部署），自动放宽到 7 / 12 / 30 天，
@@ -171,7 +169,6 @@ PREDICTION_ACCURACY_EVALUATION = True         # 是否评估预测准确率
   服务启动与保存设置后都会**立即执行首次检查**
 - **低余额预警**：`balance < LOW_BALANCE_THRESHOLD` 时发邮件，24 小时内只发一次
 - **预测预警**：预计 `days_to_threshold ≤ PREDICTION_ALERT_DAYS` 时发邮件，同样 24 小时去重
-- **准确率评估**：每次检查后回看历史预测是否命中，打分入库
 
 定时检查与手动「立即检查」共用 `monitor.run_check()` 一条流程，不要另写检查逻辑。
 

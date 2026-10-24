@@ -22,7 +22,7 @@ Windows 本机单实例部署，非生产级服务。代码源自 GitHub 开源�
 | 文件 | 职责 | 关键入口 |
 |---|---|---|
 | `app.py` | 薄入口：装配 + 定时调度 | `set_monitor()`、`setup_scheduler()`、`scheduled_check()` |
-| `storage.py` | SQLite 访问层（连接统一上下文管理） | `init_db()`（含历史回填）、`parse_pools()`、`balances_with_raw_since()`、`balance_trend()`、`evaluate_prediction_accuracy()` |
+| `storage.py` | SQLite 访问层（连接统一上下文管理） | `init_db()`（含历史回填）、`parse_pools()`、`balances_with_raw_since()`、`balance_trend()` |
 | `monitor.py` | 登录/采集/预测/统计 + 完整检查流程 | `ElectricMonitor.get_electric_data()`、`.predict()`、`.get_statistics()`、`run_check()`、`_pool_intervals()`、`daily_usage_trend()`、`snap_recharge_amount()` |
 | `notifier.py` | 邮件预警（24 小时去重） | `send_low_balance_alert()`、`send_prediction_alert()` |
 | `web.py` | 全部 Flask 路由 | `create_app(monitor, reschedule)` |
@@ -64,7 +64,7 @@ Windows 本机单实例部署，非生产级服务。代码源自 GitHub 开源�
   `PREDICTION_MIN_OBSERVED_DAYS`（0.5 天），按 3→7→12→30 天逐级放宽，
   取第一个满足门槛的；放宽时 `prediction_method='extended'` 且可信度打 6 折
 - 字段语义：`days_remaining` = 电量**耗尽**天数；`days_to_threshold` = 降到阈值天数
-  （预警邮件与准确率评估用它）；`predicted_date` = 到阈值日期；
+  （预测预警邮件用它触发）；`predicted_date` = 到阈值日期；
   `window_days` = 本次实际使用的窗口天数；`prediction_method` = `recent`/`extended`
 - 停服日处理：余额**日线**用 `balance_trend(..., drop_early_tail=True)` 跳过
   「当日最晚记录在中午之前」的天（日末无读数会画出假平台）；
@@ -117,9 +117,15 @@ Windows 本机单实例部署，非生产级服务。代码源自 GitHub 开源�
 ## 已知遗留 / 勿动
 
 - `config.py.backup`：UI 保存配置时的自动备份，每次保存被覆盖
+- 数据库里的 `prediction_records` 表（约 490 行）是**已废弃的准确率追踪子系统**遗留。
+  准确率评估的样本独立性不成立（490 条预测实际只对应 6 次「跌破阈值」事件，
+  平均分 26.9 无统计意义），代码已全部移除；表与数据按「历史零迁移」原则保留不动，
+  新库不再创建该表。见到它不要以为还有功能在读它。
 - `electric_monitor.log` 混有 GBK 编码历史行：读日志必须 `errors='replace'`
   （`/api/logs` 已容错，新代码勿改回严格解码）。新写入的行已是纯 UTF-8
   （`app.py` 的 FileHandler 显式指定了 encoding）
 - 已删除、勿再引入：`room_finder.py`（查房间功能已由 `setup_config.py` 覆盖）、
   `start.bat` / `start.sh`（早期 conda 方案遗留）、
-  `bad_records_backup_20260829.json`（他房脏数据备份，事故已处理完毕，含他人数据不宜留存）
+  `bad_records_backup_20260829.json`（他房脏数据备份，事故已处理完毕，含他人数据不宜留存）、
+  预测准确率追踪子系统（`save_prediction_record` / `evaluate_prediction_accuracy` /
+  `/api/prediction/accuracy`+`/analytics` / `PREDICTION_ACCURACY_EVALUATION`，页面零消费者）

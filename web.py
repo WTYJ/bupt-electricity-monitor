@@ -7,12 +7,11 @@ create_app(monitor, reschedule) 返回配置好的 Flask 应用：
 - monitor: ElectricMonitor 实例（数据采集/预测/统计）
 - reschedule: 配置保存后重新调度定时任务的回调（由 app.py 提供）
 
-修复记录：
-- 旧版 /api/prediction/analytics 与 /api/prediction/accuracy 两个路由装饰器
-  误挂在 scheduled_check 上，访问即触发一次完整检查且返回错误；
-  现改为真正返回预测准确率统计。
-- 手动检查与定时检查共用 monitor.run_check，消除重复逻辑。
-- 阈值统一使用 config.LOW_BALANCE_THRESHOLD（PREDICTION_THRESHOLD 已废弃）。
+约定：
+- 手动检查与定时检查共用 monitor.run_check，不另写检查逻辑。
+- 全系统只有一个阈值 config.LOW_BALANCE_THRESHOLD。
+- /api/config POST 会整文件重写 config.py，新增配置项必须同步改
+  web.py 模板、setup_config.py 模板、config.py.example 三处。
 """
 
 import importlib
@@ -132,8 +131,7 @@ def create_app(monitor, reschedule=None):
     def api_get_prediction():
         """获取余额预测API（threshold 参数可选，默认使用预警阈值）。
 
-        只重算不入库：预测记录由 run_check（定时/手动检查）统一保存，
-        避免每次页面调用都插入重复记录、污染准确率统计。
+        只重算不写库：预测结果按当前数据即时计算，页面反复调用也没有副作用。
         """
         try:
             threshold = float(request.args.get('threshold', config.LOW_BALANCE_THRESHOLD))
@@ -154,12 +152,6 @@ def create_app(monitor, reschedule=None):
                 'prediction_method': 'recent',
                 'window_days': None
             })
-
-    @app.route('/api/prediction/analytics')
-    @app.route('/api/prediction/accuracy')
-    def api_prediction_accuracy():
-        """预测准确率统计API（旧版这两个路由误挂在定时检查上）"""
-        return jsonify(storage.evaluate_prediction_accuracy())
 
     # ── 配置 API ─────────────────────────────────────────────────
 
@@ -244,7 +236,6 @@ PREDICTION_MAX_DAILY_RATE = {getattr(config, 'PREDICTION_MAX_DAILY_RATE', 50.0)}
 PREDICTION_RECENT_WINDOW_DAYS = {getattr(config, 'PREDICTION_RECENT_WINDOW_DAYS', 3)}
 PREDICTION_MIN_SAMPLES = {getattr(config, 'PREDICTION_MIN_SAMPLES', 12)}
 PREDICTION_MIN_OBSERVED_DAYS = {getattr(config, 'PREDICTION_MIN_OBSERVED_DAYS', 0.5)}
-PREDICTION_ACCURACY_EVALUATION = {getattr(config, 'PREDICTION_ACCURACY_EVALUATION', True)}
 '''
             # 备份原配置文件
             shutil.copy('config.py', 'config.py.backup')
