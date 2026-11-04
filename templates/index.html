@@ -70,7 +70,7 @@
                         <strong id="usage-avg-7d">{{ "%.2f" | format(stats.usage_avg_7d or 0) }}</strong>
                         <small>度</small>
                     </div>
-                    <p>按近7天实际观测折算{% if stats.observed_days_7d %}，已观测约{{ stats.observed_days_7d }}天{% endif %}</p>
+                    <p>按近{{ stats.usage_avg_window_days or 7 }}天实际观测折算{% if stats.observed_days_7d %}，已观测约{{ stats.observed_days_7d }}天{% endif %}</p>
                 </article>
 
                 <article class="stat-card">

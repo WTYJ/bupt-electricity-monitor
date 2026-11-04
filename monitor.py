@@ -237,21 +237,16 @@ class ElectricMonitor:
                     last_grant = {'time': ts, 'amount': round(free - prev_free, 1)}
             prev_surplus, prev_free = surplus, free
 
-        # 近7天日均用电量（度/天）：按实际观测时长折算，记录不足7天时按已有观测计算
-        usage_samples = self.collect_usage_intervals(7)
-        usage_avg_7d = None
-        observed_days_7d = 0.0
-        if usage_samples:
-            total_drop = sum(s['drop'] for s in usage_samples)
-            total_span = sum(s['span'] for s in usage_samples)
-            if total_span > 0:
-                usage_avg_7d = round(total_drop / total_span, 2)
-                observed_days_7d = round(min(total_span, 7.0), 2)
+        # 日均用电量（度/天）：优先近 7 天，样本不足时放宽窗口。
+        # 动机：间隔很久才打开时，7 天窗口里往往只有刚采到的一条记录，
+        # 配不出区间（区间需要相邻两条），会显示 0。沿用预测那边的「逐级放宽」
+        # 思路，放宽到能凑出区间为止——速率跨空洞按时间加权平均是合理的估计。
+        usage_avg, observed_days, avg_window_days = self.avg_daily_usage(7)
 
-        # 本月用量：实时按区间采样累加（充值还原后数值正确），无数据时回退到存量记录值
-        month_usage = self.usage_since(datetime.now().strftime('%Y-%m-01 00:00:00'))
-        if month_usage is None:
-            month_usage = storage.latest_month_usage()
+        # 本月用量：与「每日用电量」图表同一套口径——区间按时间占比分摊到自然日，
+        # 只累加落在本月的部分。这样即使本月只有一条记录（上一条在上个月），
+        # 跨月区间也能按天拆分，不会因为配不出区间而显示 0。
+        month_usage = self.month_usage_allocated()
 
         # 余额趋势：24小时按小时、30天按天
         # （曾有一个 12 个月的 monthly 序列，前端从未使用，已删除）
@@ -286,8 +281,9 @@ class ElectricMonitor:
             'current_power': current_power,
             'free_pool': free_pool,
             'last_grant': last_grant,
-            'usage_avg_7d': usage_avg_7d if usage_avg_7d is not None else 0.0,
-            'observed_days_7d': observed_days_7d,
+            'usage_avg_7d': usage_avg if usage_avg is not None else 0.0,
+            'observed_days_7d': observed_days,
+            'usage_avg_window_days': avg_window_days,
             'last_recharge': last_recharge,
             'month_usage': month_usage if month_usage is not None else 0.0,
             'balance_trend_hourly': balance_trend_hourly,
@@ -295,6 +291,52 @@ class ElectricMonitor:
             'daily_usage': daily_usage,
             'prediction': prediction
         }
+
+    def avg_daily_usage(self, preferred_days=7):
+        """日均用电量（度/天）：优先最近 preferred_days 天，样本不足时逐级放宽。
+
+        动机：间隔很久才打开时，短窗口里可能只有刚采到的一条记录。区间需要
+        相邻两条记录才能配对，单条记录会得到 0——这是用户实际遇到的问题
+        （距上次记录隔了十天，首屏日均显示 0，采到第二条才恢复）。
+
+        日均是**速率**，跨数据空洞按时间加权平均是合理估计（与 predict 的
+        窗口放宽同思路），所以这里放宽窗口而不是显示 0。
+
+        Returns:
+            (日均速率 or None, 实际观测天数, 采用的窗口天数)
+        """
+        candidates = []
+        for d in (preferred_days, max(preferred_days, 14), 30):
+            if d not in candidates:
+                candidates.append(d)
+        for days in candidates:
+            samples = self.collect_usage_intervals(days)
+            if not samples:
+                continue
+            total_drop = sum(s['drop'] for s in samples)
+            total_span = sum(s['span'] for s in samples)
+            if total_span > 0:
+                return round(total_drop / total_span, 2), round(min(total_span, days), 2), days
+        return None, 0.0, preferred_days
+
+    def month_usage_allocated(self):
+        """本月累计用量（度）：区间按时间占比分摊到自然日，只累加本月部分。
+
+        与 daily_usage_trend（「每日用电量」柱状图）完全同一套口径：
+        - 记录密集时是精确值；
+        - 停服/长时间未打开时，跨越空洞的区间按天数线性均摊；
+        - 跨月区间按天拆分，本月只拿属于自己的那部分（不把上月用电算进本月）。
+
+        这样即使本月只有一条记录（上一条在上个月），也能给出合理估计，
+        而不会因为「本月窗口里配不出区间」显示 0。
+
+        Returns:
+            float: 本月累计度数；本月完全没有可用区间时才返回 0.0
+        """
+        # 覆盖「本月 + 跨月边界的上一个区间起点」；35 天足够（最长月 31 天）
+        daily = self.daily_usage_trend(35)
+        prefix = datetime.now().strftime('%Y-%m-')
+        return round(sum(v for k, v in daily if k.startswith(prefix)), 2)
 
     def collect_usage_intervals(self, lookback_days=30):
         """读取最近 lookback_days 天的历史记录并切分成用电样本"""

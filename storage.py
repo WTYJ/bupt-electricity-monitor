@@ -191,19 +191,6 @@ def balance_trend(hour_expr, group_expr, since_expr, drop_early_tail=False):
         ''', params).fetchall()
 
 
-def latest_month_usage():
-    """本月最新一条非空 usage_month"""
-    with _connect() as conn:
-        row = conn.execute('''
-            SELECT usage_month FROM electric_records
-            WHERE timestamp >= datetime('now', 'localtime', 'start of month')
-            AND usage_month IS NOT NULL
-            ORDER BY timestamp DESC
-            LIMIT 1
-        ''').fetchone()
-    return row[0] if row else None
-
-
 def max_record_timestamp():
     """最新有效记录的时间戳（前端版本探针用）"""
     with _connect() as conn:
