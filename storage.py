@@ -154,10 +154,13 @@ def recent_records(limit=20):
         ''', (limit,)).fetchall()
 
 
-def balance_trend(hour_expr, group_expr, since_expr, drop_early_tail=False):
+def balance_trend(bucket_expr, since_expr, drop_early_tail=False):
     """按时间粒度聚合的余额趋势：每个分组的点是该组**最晚一条记录**的余额
     （当天结束时剩多少度），而不是全组平均——平均值会产生一天中任何
     时刻都不存在的数字，且充值日会被严重拉偏。
+
+    bucket_expr 同时用作分组标签（label）与组内分区（PARTITION BY）——
+    两个用途在本项目里从来都是同一个表达式（按小时/按天），故合并为单参数。
 
     drop_early_tail=True（仅按天分组用）：跳过"当日最晚记录在中午之前"的停服日
     ——这种日子的最晚记录其实是当天起点，画出来会造成假平台（如整天停服时
@@ -172,14 +175,14 @@ def balance_trend(hour_expr, group_expr, since_expr, drop_early_tail=False):
                   AND label <> (SELECT MAX({g}) FROM electric_records
                                 WHERE timestamp > datetime('now', 'localtime', ?)
                                 AND balance IS NOT NULL)
-              )'''.format(g=group_expr)
+              )'''.format(g=bucket_expr)
         params.append(since_expr)
     with _connect() as conn:
         return conn.execute(f'''
             SELECT label, balance FROM (
-                SELECT {group_expr} AS label, balance, timestamp,
+                SELECT {bucket_expr} AS label, balance, timestamp,
                        ROW_NUMBER() OVER (
-                           PARTITION BY {hour_expr}
+                           PARTITION BY {bucket_expr}
                            ORDER BY timestamp DESC
                        ) AS rn
                 FROM electric_records

@@ -251,11 +251,9 @@ class ElectricMonitor:
         # 余额趋势：24小时按小时、30天按天
         # （曾有一个 12 个月的 monthly 序列，前端从未使用，已删除）
         balance_trend_hourly = storage.balance_trend(
-            "strftime('%Y-%m-%d %H', timestamp)",
             "strftime('%Y-%m-%d %H:00:00', timestamp)",
             '-24 hours')
         balance_trend_daily = storage.balance_trend(
-            "date(timestamp)",
             "date(timestamp)",
             '-30 days',
             drop_early_tail=True)  # 停服日（日末无读数）不画点，避免假平台
@@ -379,6 +377,27 @@ class ElectricMonitor:
         if not samples:
             return None
         return round(sum(s['drop'] for s in samples), 2)
+
+    def usage_curve_since(self, since_str):
+        """自 since_str 起的"累计用电量曲线"，供调用方按时间点查表。
+
+        Returns:
+            (ends, cums)：ends 为各区间终点（'YYYY-MM-DD HH:MM:SS'，升序），
+            cums[i] 为截至 ends[i] 的累计用电量（未取整的浮点和）。
+            查表方式：ends 中 <= 某时间戳的最后一段即该时点的累计值；
+            曲线为空表示窗口内没有可用区间（对应 usage_since 的 None）。
+
+        动机：首页"最近记录"表格要按每条记录的时间算"截至该时的本月用量"，
+        旧实现逐条调 usage_since(until)，每行都重读整月历史并重新解析全部
+        raw_data。区间切分与记录时间无关，切一次即可整体复用。
+        """
+        ends, cums = [], []
+        total = 0.0
+        for s in self._samples_since(since_str):
+            total += s['drop']
+            ends.append(s['end'])
+            cums.append(total)
+        return ends, cums
 
     def _pool_intervals(self, cutoff_str, until_str=None):
         """相邻记录对的用电区间：(start, end, span天, 消耗度数)。
@@ -523,19 +542,8 @@ class ElectricMonitor:
 
             latest = storage.latest_record()
 
-            result = {
-                'success': False,
-                'message': '',
-                'current_balance': 0.0,
-                'threshold': threshold,
-                'days_remaining': None,
-                'days_to_threshold': None,
-                'predicted_date': None,
-                'daily_usage_avg': 0.0,
-                'prediction_confidence': 'low',
-                'prediction_method': 'recent',
-                'window_days': None,
-            }
+            # 失败兜底与成功路径共用同一份字典骨架，逐字段填成功值
+            result = failed_prediction('', threshold)
 
             if not latest or latest[2] is None:
                 result['message'] = '无法获取当前剩余电量，预测失败'
@@ -593,23 +601,13 @@ class ElectricMonitor:
             remaining = current_balance - threshold
 
             # 窗口内部一律简单时间加权：短窗口已经足够"新"，不再叠加近因权重
+            # （rate == overall_avg，且上方已排除 overall_avg <= 0.0001 的情形）
             rate = overall_avg
 
             # 可信度 = 窗口覆盖度；放宽过窗口说明主窗口样本不够，可信度打折
             coverage = min(observed_days / max(window_days, 1), 1.0)
             quality = coverage * (0.6 if used_fallback else 1.0)
             confidence = 'high' if quality > 0.7 else ('medium' if quality > 0.4 else 'low')
-            result['daily_usage_avg'] = round(rate, 2)
-
-            # 近期几乎没有消耗（如降温关空调后），换挡后的速率同样如实报告
-            if rate <= 0.0001:
-                result.update({
-                    'success': True,
-                    'message': '近期几乎没有用电消耗，无法估计耗尽时间',
-                    'prediction_confidence': confidence,
-                    'prediction_method': method,
-                })
-                return result
 
             # 线性外推：耗尽时间 = 剩余电量 ÷ 估计日均；已低于阈值时预警线日期就是今天
             days_to_deplete = current_balance / rate
@@ -645,21 +643,33 @@ class ElectricMonitor:
 
         except Exception as e:
             logging.error(f"电量预测时出错: {str(e)}")
-            if threshold is None:
-                threshold = float(getattr(config, 'LOW_BALANCE_THRESHOLD', 10.0))
-            return {
-                'success': False,
-                'message': f'预测失败: {str(e)}',
-                'current_balance': 0.0,
-                'threshold': threshold,
-                'days_remaining': None,
-                'days_to_threshold': None,
-                'predicted_date': None,
-                'daily_usage_avg': 0.0,
-                'prediction_confidence': 'low',
-                'prediction_method': 'recent',
-                'window_days': None,
-            }
+            return failed_prediction(f'预测失败: {str(e)}')
+
+
+def failed_prediction(message, threshold=None):
+    """构造统一形状的预测失败结果（predict 内部与 /api/prediction 兜底共用）。
+
+    threshold 为 None 时回落到 config.LOW_BALANCE_THRESHOLD；配置损坏时
+    再回落到 10.0，保证失败路径本身永不抛错。
+    """
+    if threshold is None:
+        try:
+            threshold = float(config.LOW_BALANCE_THRESHOLD)
+        except (TypeError, ValueError):
+            threshold = 10.0
+    return {
+        'success': False,
+        'message': message,
+        'current_balance': 0.0,
+        'threshold': threshold,
+        'days_remaining': None,
+        'days_to_threshold': None,
+        'predicted_date': None,
+        'daily_usage_avg': 0.0,
+        'prediction_confidence': 'low',
+        'prediction_method': 'recent',
+        'window_days': None,
+    }
 
 
 def run_check(monitor):

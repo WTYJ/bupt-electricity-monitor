@@ -14,9 +14,11 @@ create_app(monitor, reschedule) 返回配置好的 Flask 应用：
   web.py 模板、setup_config.py 模板、config.py.example 三处。
 """
 
+import bisect
 import importlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -24,7 +26,7 @@ from datetime import datetime
 
 import config
 from flask import Flask, jsonify, render_template, request
-from monitor import run_check
+from monitor import run_check, failed_prediction
 
 import storage
 
@@ -49,14 +51,21 @@ def create_app(monitor, reschedule=None):
     def index():
         """主页"""
         stats = monitor.get_statistics()
-        # 表格里的"本月用量"按完整历史实时重算（存量记录里充值后的行存的是NULL）
+        # 表格里的"本月用量"按完整历史实时重算（存量记录里充值后的行存的是NULL）。
+        # 区间只切一次得到"累计用量曲线"，再按每条记录的时间戳查表——
+        # 旧实现逐条调用 usage_since(until)，每行都重读整月历史并重新解析全部
+        # raw_data（10 次全量扫描），首页渲染耗时约为现在的两倍。
+        # 等价性前提：库内时间戳统一为 19 位 'YYYY-MM-DD HH:MM:SS'（已穷举核实
+        # 全表 0 例外），字典序即时间序，"曲线终点 <= 记录时间"的累计值与
+        # "逐条 usage_since(month_start, until=记录时间)"严格等价。
         month_start = datetime.now().strftime('%Y-%m-01 00:00:00')
+        curve_ends, curve_cum = monitor.usage_curve_since(month_start)
         records = []
         for r in storage.recent_records(10):
             r = list(r)
-            computed = monitor.usage_since(month_start, until_str=str(r[1]))
-            if computed is not None:
-                r[4] = computed
+            idx = bisect.bisect_right(curve_ends, str(r[1])) - 1
+            if idx >= 0:
+                r[4] = round(curve_cum[idx], 2)
             records.append(r)
         return render_template(
             'index.html',
@@ -139,19 +148,8 @@ def create_app(monitor, reschedule=None):
             return jsonify(prediction)
         except Exception as e:
             logging.error(f"获取预测失败: {str(e)}")
-            return jsonify({
-                'success': False,
-                'message': f'获取预测失败: {str(e)}',
-                'current_balance': 0.0,
-                'threshold': 10.0,
-                'days_remaining': None,
-                'days_to_threshold': None,
-                'predicted_date': None,
-                'daily_usage_avg': 0.0,
-                'prediction_confidence': 'low',
-                'prediction_method': 'recent',
-                'window_days': None
-            })
+            # 与 monitor.predict 的失败兜底共用同一份默认字典（阈值取 config 而非旧的硬编码 10.0）
+            return jsonify(failed_prediction(f'获取预测失败: {str(e)}'))
 
     # ── 配置 API ─────────────────────────────────────────────────
 
@@ -177,9 +175,25 @@ def create_app(monitor, reschedule=None):
             if not data:
                 return jsonify({'success': False, 'message': '无效的配置数据'})
 
-            threshold = data.get('threshold', 10.0)
+            # 输入健壮性：设置表单带 novalidate，浏览器不拦截非法值；
+            # 清空阈值输入时 JS 的 parseFloat 会产出 NaN → JSON null，
+            # 直接落盘会写成 LOW_BALANCE_THRESHOLD = None，之后所有检查与页面全部崩溃。
+            try:
+                threshold = float(data.get('threshold', 10.0))
+            except (TypeError, ValueError):
+                return jsonify({'success': False, 'message': '无效的预警阈值'})
+            if not math.isfinite(threshold) or threshold < 0:
+                return jsonify({'success': False, 'message': '预警阈值必须是不小于 0 的数字'})
+
+            try:
+                check_frequency = int(data.get('check_frequency', 60))
+            except (TypeError, ValueError):
+                return jsonify({'success': False, 'message': '无效的检查频率'})
+            # 与设置弹窗的 min/max 一致；负值会让 APScheduler 在下次启动时崩溃
+            if not (5 <= check_frequency <= 1440):
+                return jsonify({'success': False, 'message': '检查频率需在 5～1440 分钟之间'})
+
             emails = data.get('emails', [])
-            check_frequency = data.get('check_frequency', 60)
 
             # 验证邮箱格式
             valid_emails = []

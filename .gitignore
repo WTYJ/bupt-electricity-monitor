@@ -15,8 +15,5 @@ venv/
 # 系统
 .DS_Store
 
-# 本地 git 历史备份（重建历史时用，绝不入库）
-.git.backup/
-
 # 本地 git 备份（重建历史时用，绝不入库）
 .git.backup*/

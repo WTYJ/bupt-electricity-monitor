@@ -53,6 +53,50 @@ document.addEventListener('DOMContentLoaded', function() {
     // 初始化图表和设置
     drawCharts();
     loadSettings();
+
+    // 设置表单提交（与首屏初始化共用同一个 DOMContentLoaded 监听）
+    const settingsForm = document.getElementById('settingsForm');
+    if (settingsForm) {
+        settingsForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            const btn = this.querySelector('button[type="submit"]');
+            setButtonLoading(btn, true);
+
+            const formData = {
+                threshold: parseFloat(document.getElementById('threshold').value),
+                emails: document.getElementById('emails').value.split('\n').filter(email => email.trim()),
+                check_frequency: parseInt(document.getElementById('checkFrequency').value)
+            };
+
+            fetch('/api/config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(formData)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showAlert('设置保存成功，页面即将刷新！', 'success');
+                    // 保存后整页刷新，让阈值/横幅/预测面板立即反映新配置
+                    setTimeout(() => {
+                        location.reload();
+                    }, 1000);
+                } else {
+                    showAlert(data.message || '保存失败', 'error');
+                }
+            })
+            .catch(error => {
+                console.error('保存设置失败:', error);
+                showAlert('保存失败，请稍后重试', 'error');
+            })
+            .finally(() => {
+                setButtonLoading(btn, false);
+            });
+        });
+    }
 });
 
 // 显示提示信息
@@ -541,9 +585,6 @@ function drawChart(canvasId, chartData, chartType) {
                 : hh + '时';
             return { text, full: isDayStart };
         }
-        if (chartType === 'monthly') {
-            return { text: String(points[index].label), full: true };
-        }
         const date = new Date(points[index].label + 'T00:00:00');
         return Number.isFinite(date.getTime())
             ? { text: (date.getMonth() + 1) + '/' + date.getDate(), full: false }
@@ -893,52 +934,6 @@ function escapeHtml(text) {
     };
     return text.replace(/[&<>"']/g, function(m) { return map[m]; });
 }
-
-// 设置表单提交处理
-document.addEventListener('DOMContentLoaded', function() {
-    const settingsForm = document.getElementById('settingsForm');
-    if (settingsForm) {
-        settingsForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-
-            const btn = this.querySelector('button[type="submit"]');
-            setButtonLoading(btn, true);
-
-            const formData = {
-                threshold: parseFloat(document.getElementById('threshold').value),
-                emails: document.getElementById('emails').value.split('\n').filter(email => email.trim()),
-                check_frequency: parseInt(document.getElementById('checkFrequency').value)
-            };
-
-            fetch('/api/config', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(formData)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showAlert('设置保存成功，页面即将刷新！', 'success');
-                    // 保存后整页刷新，让阈值/横幅/预测面板立即反映新配置
-                    setTimeout(() => {
-                        location.reload();
-                    }, 1000);
-                } else {
-                    showAlert(data.message || '保存失败', 'error');
-                }
-            })
-            .catch(error => {
-                console.error('保存设置失败:', error);
-                showAlert('保存失败，请稍后重试', 'error');
-            })
-            .finally(() => {
-                setButtonLoading(btn, false);
-            });
-        });
-    }
-});
 
 // ── 主题切换（三态：跟随系统 / 固定浅色 / 固定深色）──────────
 const themeToggle = document.getElementById('theme-toggle');

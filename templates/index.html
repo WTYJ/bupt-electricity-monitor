@@ -55,7 +55,7 @@
         {# 全系统唯一阈值 LOW_BALANCE_THRESHOLD；is_low 供横幅与主卡数字着色共用 #}
         {% set is_low = stats.latest and stats.latest[2] is not none and stats.prediction.threshold and stats.latest[2] < stats.prediction.threshold %}
         {% if is_low %}
-        <div class="alert-banner is-visible" id="lowBalanceBanner">
+        <div class="alert-banner" id="lowBalanceBanner">
             <span class="banner-icon" aria-hidden="true">⚠️</span>
             剩余电量 {{ "%.1f" | format(stats.latest[2]) }} 度，已低于预警阈值 {{ stats.prediction.threshold }} 度，请及时充值！
         </div>

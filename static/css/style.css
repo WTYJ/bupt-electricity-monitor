@@ -2,7 +2,8 @@
    电费监控 · 新版 UI（2026-11-16 重设计）
    架构：@layer 分层（reset → base → theme → components）
    主题：meta[color-scheme] 驱动 + light-dark() token（详见部署说明）
-   旧版样式备份于 ui_backup_20261116/style.css，未经用户确认不得删除
+   旧版样式可从 git 历史恢复（备份目录 ui_backup_20261116/ 已于
+   2026-11-21 经用户确认删除）
    ============================================================ */
 
 @layer reset, base, theme, components;
