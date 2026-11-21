@@ -3,6 +3,36 @@ let hourlyChartData, dailyChartData, dailyUsageData = [];
 let currentChart = 'daily'; // 当前显示的图表类型
 let dailyUsageRange = 7; // 每日用电量柱状图的时间范围（天）
 
+// ── 主题（color-scheme meta 方案）─────────────────────────────
+// 三态数据模型：localStorage 无值 = 跟随系统；'light'/'dark' = 手动固定。
+// CSS 通过 :root:has(head meta[content=...]) 跟随 meta；light-dark() token
+// 随 color-scheme 自动切换，因此主题切换只需要改 meta。
+function storedColorScheme() {
+    try {
+        const v = localStorage.getItem('color-scheme');
+        return (v === 'light' || v === 'dark') ? v : null;
+    } catch (e) { return null; }
+}
+
+function systemScheme() {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+// 当前实际渲染的模式：手动覆盖优先，否则跟随系统
+function resolvedScheme() {
+    return storedColorScheme() ?? systemScheme();
+}
+
+function applyColorScheme() {
+    const stored = storedColorScheme();
+    const meta = document.querySelector('meta[name="color-scheme"]');
+    if (meta) meta.content = stored ?? 'light dark';
+    // data-scheme 只服务"颜色以外"的分支（切换按钮显示哪个图标/文案）
+    document.documentElement.dataset.scheme = resolvedScheme();
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) metaTheme.setAttribute('content', resolvedScheme() === 'dark' ? '#0d1417' : '#f2f5f6');
+}
+
 // 页面加载完成后初始化
 document.addEventListener('DOMContentLoaded', function() {
     // 从数据属性中获取图表数据
@@ -34,7 +64,7 @@ function showAlert(message, type = 'success') {
     const toastRegion = document.getElementById('toastRegion');
     if (!toastRegion) return;
     toastRegion.appendChild(alertEl);
-    
+
     setTimeout(() => {
         alertEl.remove();
     }, 5000);
@@ -57,11 +87,46 @@ function getActionElement(event) {
     return event?.currentTarget || event?.target?.closest('button, a') || null;
 }
 
+// ── 通用确认对话框（替代 window.confirm）─────────────────────
+// 原生 <dialog> 提供 top layer / 焦点圈定 / Esc；confirmDialog 的 close
+// 事件里读取 returnValue 并复位（指南要求，避免旧值串场）。
+const confirmDialog = document.getElementById('confirmDialog');
+let confirmResolver = null;
+
+if (confirmDialog) {
+    confirmDialog.addEventListener('close', () => {
+        const value = confirmDialog.returnValue;
+        confirmDialog.returnValue = ''; // 复位：Esc 关闭不带值，浏览器对旧值行为不一
+        const resolve = confirmResolver;
+        confirmResolver = null;
+        if (resolve) resolve(value === 'confirm');
+    });
+}
+
+// options: { title, message, confirmText } → Promise<boolean>
+function confirmAction(options = {}) {
+    const { title = '确认操作', message = '', confirmText = '确定' } = options;
+    if (!confirmDialog) {
+        return Promise.resolve(window.confirm(message)); // 极端兜底
+    }
+    if (confirmDialog.open) return Promise.resolve(false);
+
+    document.getElementById('confirmTitle').textContent = title;
+    document.getElementById('confirmMessage').textContent = message;
+    const confirmBtn = confirmDialog.querySelector('[value="confirm"]');
+    if (confirmBtn) confirmBtn.textContent = confirmText;
+
+    return new Promise((resolve) => {
+        confirmResolver = resolve;
+        confirmDialog.showModal(); // autofocus 在"取消"上，破坏性操作默认落点是安全动作
+    });
+}
+
 // 立即检查
 function checkNow(event) {
     const btn = getActionElement(event);
     setButtonLoading(btn, true);
-    
+
     fetch('/api/check', { method: 'POST' })
         .then(response => response.json())
         .then(data => {
@@ -88,7 +153,7 @@ function checkNow(event) {
 function refreshPrediction(event) {
     const btn = getActionElement(event);
     setButtonLoading(btn, true);
-    
+
     fetch('/api/prediction')
         .then(response => response.json())
         .then(data => {
@@ -107,26 +172,26 @@ function refreshPrediction(event) {
 // 更新预测显示
 function updatePredictionDisplay(prediction) {
     if (!prediction) return;
-    
+
     // 更新预警阈值
     if (prediction.threshold !== undefined) {
         document.getElementById('prediction-threshold').textContent = prediction.threshold.toFixed(1) + '度';
     }
-    
 
-    
+
+
     // 更新估计日均与已观测时长
     document.getElementById('prediction-rate').textContent =
         (prediction.daily_usage_avg ?? 0).toFixed(2) + '度';
     const observedDays = prediction.data_points ? prediction.data_points.observed_days : null;
     document.getElementById('prediction-observed').textContent =
         (observedDays !== null && observedDays !== undefined) ? observedDays + '天' : '--';
-    
+
     // 更新预计剩余天数
     const daysElement = document.getElementById('prediction-days');
     if (prediction.days_remaining !== null && prediction.days_remaining !== undefined) {
         daysElement.textContent = prediction.days_remaining.toFixed(1) + '天';
-        
+
         // 根据剩余天数设置颜色
         daysElement.className = 'forecast-days';
         if (prediction.days_remaining <= 3) {
@@ -138,10 +203,10 @@ function updatePredictionDisplay(prediction) {
         daysElement.textContent = '--';
         daysElement.className = 'forecast-days';
     }
-    
+
     // 更新预计到达日期
     document.getElementById('prediction-date').textContent = prediction.predicted_date || '--';
-    
+
     // 更新预测方式与可信度（合成一格显示，避免 prediction-metrics 网格出现半行）
     const methodElement = document.getElementById('prediction-method');
     if (methodElement) {
@@ -165,14 +230,18 @@ function predictionMethodLabel(prediction) {
 }
 
 // 清空所有记录
-function clearAllRecords(event) {
-    if (!confirm('确定要清空所有历史记录吗？此操作不可恢复。')) {
+async function clearAllRecords(event) {
+    if (!(await confirmAction({
+        title: '清空全部历史记录',
+        message: '将删除全部历史检查记录，此操作不可恢复。确定继续吗？',
+        confirmText: '清空',
+    }))) {
         return;
     }
-    
+
     const btn = getActionElement(event);
     setButtonLoading(btn, true);
-    
+
     fetch('/api/records', { method: 'DELETE' })
         .then(response => response.json())
         .then(data => {
@@ -195,11 +264,15 @@ function clearAllRecords(event) {
 }
 
 // 删除单条记录
-function deleteRecord(recordId, event) {
-    if (!confirm('确定要删除这条记录吗？')) {
+async function deleteRecord(recordId, event) {
+    if (!(await confirmAction({
+        title: '删除这条记录',
+        message: '删除后无法恢复（不影响已保存的其他记录）。确定删除吗？',
+        confirmText: '删除',
+    }))) {
         return;
     }
-    
+
     fetch(`/api/records/${recordId}`, { method: 'DELETE' })
         .then(response => response.json())
         .then(data => {
@@ -217,15 +290,17 @@ function deleteRecord(recordId, event) {
         });
 }
 
-// 打开设置模态框
+// 打开设置模态框（原生 dialog：焦点圈定 / Esc / 焦点归还均由浏览器处理）
 function openSettings() {
-    document.getElementById('settingsModal').style.display = 'block';
+    const modal = document.getElementById('settingsModal');
+    if (modal && !modal.open) modal.showModal();
     loadSettings();
 }
 
 // 关闭设置模态框
 function closeSettings() {
-    document.getElementById('settingsModal').style.display = 'none';
+    const modal = document.getElementById('settingsModal');
+    if (modal && modal.open) modal.close();
 }
 
 function loadSettings() {
@@ -245,17 +320,18 @@ function loadSettings() {
 
 // 图表切换函数
 function switchChart(chartType) {
-    // 更新标签状态
-    document.querySelectorAll('.chart-tab').forEach(tab => {
+    // 只在"电量趋势"这组 tab 内切换 active——旧版误用 .chart-tab 会把
+    // "每日用电量"的时间范围 tab 一并清掉 active（互踩 bug），已修
+    document.querySelectorAll('[data-chart]').forEach(tab => {
         tab.classList.remove('active');
     });
     document.querySelector(`[data-chart="${chartType}"]`).classList.add('active');
-    
-    // 切换图表容器显示
-    document.getElementById('hourlyChartContainer').style.display = chartType === 'hourly' ? 'block' : 'none';
-    document.getElementById('dailyChartContainer').style.display = chartType === 'daily' ? 'block' : 'none';
-    document.getElementById('monthlyChartContainer').style.display = chartType === 'monthly' ? 'block' : 'none';
-    
+
+    // 切换图表容器显示（hidden 属性替代内联 display 样式）
+    document.getElementById('hourlyChartContainer').hidden = chartType !== 'hourly';
+    document.getElementById('dailyChartContainer').hidden = chartType !== 'daily';
+    document.getElementById('monthlyChartContainer').hidden = chartType !== 'monthly';
+
     currentChart = chartType;
     drawCharts();
 }
@@ -274,17 +350,39 @@ function drawCharts() {
 }
 
 // 绘制电量趋势图
+// 图表配色取自 CSS token，但 canvas 只接受具体颜色值：自定义属性在
+// getPropertyValue 下会原样返回 "light-dark(...)"，嵌套函数不会被解析，
+// 传给 canvas 会抛 "could not be parsed as a color"。因此用一个隐藏
+// 探针元素把 token 赋给 color/background，让浏览器解析成具体 rgb 再读取。
 function chartPalette() {
-    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
-    return {
-        text: dark ? '#76809a' : '#8f98aa',
-        grid: dark ? '#262f45' : '#e7eaf1',
-        line: dark ? '#8677f2' : '#5b4bd8',
-        pointFill: dark ? '#161d2d' : '#ffffff',
-        pointHover: dark ? '#c9c2fb' : '#4338ca',
-        fillTop: dark ? 'rgba(134, 119, 242, 0.25)' : 'rgba(91, 75, 216, 0.20)',
-        fillBottom: dark ? 'rgba(134, 119, 242, 0.02)' : 'rgba(91, 75, 216, 0.015)'
+    const style = getComputedStyle(document.documentElement);
+    const probe = document.createElement('span');
+    probe.style.position = 'absolute';
+    probe.style.opacity = '0';
+    probe.style.pointerEvents = 'none';
+    document.body.appendChild(probe);
+
+    // 让浏览器把 token（可能是 light-dark(...)）解析为具体颜色字符串
+    const resolve = (name, fallback) => {
+        const raw = (style.getPropertyValue(name) || '').trim();
+        if (!raw) return fallback;
+        probe.style.color = '';
+        probe.style.color = raw;
+        const resolved = getComputedStyle(probe).color;
+        return resolved || fallback;
     };
+
+    const palette = {
+        text: resolve('--chart-text', '#63757c'),
+        grid: resolve('--chart-grid', '#e4ebee'),
+        line: resolve('--accent', '#0b7f70'),
+        pointFill: resolve('--surface', '#ffffff'),
+        pointHover: resolve('--accent-strong', '#096a5e'),
+        fillTop: resolve('--accent-fill-top', 'rgba(11, 127, 112, 0.2)'),
+        fillBottom: resolve('--accent-fill-bottom', 'rgba(11, 127, 112, 0.015)')
+    };
+    probe.remove();
+    return palette;
 }
 
 function drawChart(canvasId, chartData, chartType) {
@@ -653,10 +751,9 @@ function drawDailyUsageChart() {
 }
 
 // 数据新鲜度探针（每60秒）：只拉最新记录时间戳（/api/version 近零开销），
-// 发现新数据才整页刷新，代替原来每10分钟拉全量统计的重轮询
+// 发现新数据才整页刷新。任何原生对话框打开时都不打断（含确认框）。
 setInterval(() => {
-    const modal = document.getElementById('settingsModal');
-    if (modal && modal.style.display === 'block') return; // 设置弹窗打开时不打断
+    if (document.querySelector('dialog[open]')) return;
     fetch('/api/version')
         .then(response => response.json())
         .then(v => {
@@ -668,38 +765,24 @@ setInterval(() => {
         .catch(error => console.error('数据探针失败:', error));
 }, 60000); // 1分钟
 
-// 点击模态框外部关闭
-window.addEventListener('click', function(event) {
-    const settingsModal = document.getElementById('settingsModal');
-    if (event.target === settingsModal) {
-        closeSettings();
-    }
-});
-
-window.addEventListener('keydown', function(event) {
-    if (event.key === 'Escape') {
-        closeSettings();
-    }
-});
-
 // 日志相关函数
 
 // 切换日志显示
 function toggleLogs(event) {
     const logsCard = document.getElementById('logsCard');
     const btn = getActionElement(event);
-    const btnText = btn.querySelector('.btn-text');
-    
-    if (logsCard.style.display === 'none') {
-        logsCard.style.display = 'block';
-        btnText.textContent = '隐藏日志';
+    const btnText = btn ? btn.querySelector('.btn-text') : null;
+
+    if (logsCard.hidden) {
+        logsCard.hidden = false;
+        if (btnText) btnText.textContent = '隐藏日志';
         refreshLogs(null);
-        
+
         // 滚动到日志模块
         logsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } else {
-        logsCard.style.display = 'none';
-        btnText.textContent = '查看日志';
+        logsCard.hidden = true;
+        if (btnText) btnText.textContent = '查看日志';
     }
 }
 
@@ -707,23 +790,23 @@ function toggleLogs(event) {
 async function refreshLogs(event) {
     const btn = getActionElement(event);
     if (btn) setButtonLoading(btn, true);
-    
+
     try {
         const limit = document.getElementById('logLimit')?.value || 50;
         const level = document.getElementById('logLevel')?.value || 'all';
-        
+
         const response = await fetch(`/api/logs?limit=${limit}&level=${level}`);
         const data = await response.json();
-        
+
         if (data.success) {
             displayLogs(data.logs);
         } else {
-            document.getElementById('log-content').innerHTML = 
+            document.getElementById('log-content').innerHTML =
                 '<div class="log-empty">加载日志失败: ' + (data.message || '未知错误') + '</div>';
         }
     } catch (error) {
         console.error('获取日志失败:', error);
-        document.getElementById('log-content').innerHTML = 
+        document.getElementById('log-content').innerHTML =
             '<div class="log-empty">网络错误，无法获取日志</div>';
     } finally {
         if (btn) setButtonLoading(btn, false);
@@ -733,17 +816,17 @@ async function refreshLogs(event) {
 // 显示日志
 function displayLogs(logs) {
     const logContent = document.getElementById('log-content');
-    
+
     if (!logs || logs.length === 0) {
         logContent.innerHTML = '<div class="log-empty">暂无日志记录</div>';
         return;
     }
-    
+
     const logHtml = logs.map(log => {
         const timestamp = log.timestamp || '';
         const level = log.level || 'INFO';
         const message = log.message || '';
-        
+
         return `
             <div class="log-entry ${level}">
                 <span class="log-timestamp">${timestamp}</span>
@@ -752,7 +835,7 @@ function displayLogs(logs) {
             </div>
         `;
     }).join('');
-    
+
     logContent.innerHTML = logHtml;
 
     // 日志按最新在前渲染，保持在顶部即可看到最新条目
@@ -766,23 +849,27 @@ function filterLogs() {
 
 // 清空日志
 async function clearLogs(event) {
-    if (!confirm('确定要清空所有日志吗？此操作不可恢复！')) {
+    if (!(await confirmAction({
+        title: '清空全部日志',
+        message: '日志文件将被清空，此操作不可恢复！确定继续吗？',
+        confirmText: '清空',
+    }))) {
         return;
     }
-    
+
     const btn = getActionElement(event);
     if (btn) setButtonLoading(btn, true);
-    
+
     try {
         const response = await fetch('/api/logs', {
             method: 'DELETE'
         });
-        
+
         const data = await response.json();
-        
+
         if (data.success) {
             showAlert('日志已清空', 'success');
-            document.getElementById('log-content').innerHTML = 
+            document.getElementById('log-content').innerHTML =
                 '<div class="log-empty">暂无日志记录</div>';
         } else {
             showAlert('清空日志失败: ' + (data.message || '未知错误'), 'error');
@@ -813,16 +900,16 @@ document.addEventListener('DOMContentLoaded', function() {
     if (settingsForm) {
         settingsForm.addEventListener('submit', function(e) {
             e.preventDefault();
-            
+
             const btn = this.querySelector('button[type="submit"]');
             setButtonLoading(btn, true);
-            
+
             const formData = {
                 threshold: parseFloat(document.getElementById('threshold').value),
                 emails: document.getElementById('emails').value.split('\n').filter(email => email.trim()),
                 check_frequency: parseInt(document.getElementById('checkFrequency').value)
             };
-            
+
             fetch('/api/config', {
                 method: 'POST',
                 headers: {
@@ -853,22 +940,55 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
-// ── 深色模式切换 ──
+// ── 主题切换（三态：跟随系统 / 固定浅色 / 固定深色）──────────
 const themeToggle = document.getElementById('theme-toggle');
 if (themeToggle) {
-    const applyThemeIcon = () => {
-        const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
-        themeToggle.textContent = current === 'dark' ? '🌙' : '☀️';
-        themeToggle.setAttribute('aria-label', current === 'dark' ? '切换浅色模式' : '切换深色模式');
-        const meta = document.querySelector('meta[name="theme-color"]');
-        if (meta) meta.setAttribute('content', current === 'dark' ? '#0e1320' : '#312e81');
-    };
-    applyThemeIcon();
+    applyColorScheme();
+
     themeToggle.addEventListener('click', () => {
-        const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-        document.documentElement.setAttribute('data-theme', next);
-        try { localStorage.setItem('theme', next); } catch (e) {}
-        applyThemeIcon();
+        // 目标 = 当前渲染模式的相反面（用户意图是"切换我看到的"，而非"反转系统默认"）
+        const target = resolvedScheme() === 'dark' ? 'light' : 'dark';
+        try {
+            if (target === systemScheme()) {
+                // 目标与系统偏好一致 = 用户在撤销手动覆盖：删除存储值，
+                // 之后的系统切换（如白天/黑夜自动切换）能继续生效
+                localStorage.removeItem('color-scheme');
+            } else {
+                localStorage.setItem('color-scheme', target);
+            }
+        } catch (e) { /* 存储被禁用时仅本次会话生效 */ }
+        applyColorScheme();
+        drawCharts(); // canvas 不随 CSS 自动变色，需显式重绘
+    });
+
+    // 系统偏好变化：无手动覆盖时立即跟随
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+        applyColorScheme();
         drawCharts();
     });
+
+    // 其他标签页改了主题：同步（storage 事件在本标签页不触发）
+    window.addEventListener('storage', (e) => {
+        if (e.key === 'color-scheme' || e.key === null) {
+            applyColorScheme();
+            drawCharts();
+        }
+    });
+}
+
+// ── closedby 渐进增强 ────────────────────────────────────────
+// settingsModal 标了 closedby="any"（点击外部可关）。不支持 closedby 的
+// 浏览器（Safari）模态默认只有 Esc 能关，这里补上点击外部关闭。
+// 注意检测指针位置而非 event.target：<dialog> 自身的 padding 也算 target。
+if (!('closedBy' in HTMLDialogElement.prototype)) {
+    const outside = (e, dialog) => {
+        const r = dialog.getBoundingClientRect();
+        return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    for (const dialog of document.querySelectorAll('dialog[closedby="any"]')) {
+        let pressedOutside = false;
+        dialog.addEventListener('pointerdown', (e) => { pressedOutside = outside(e, dialog); });
+        // 按下与抬起都在外部才关闭：文本选择拖拽结束在遮罩上时不应误关
+        dialog.addEventListener('pointerup', (e) => { if (pressedOutside && outside(e, dialog)) dialog.close(); });
+    }
 }
