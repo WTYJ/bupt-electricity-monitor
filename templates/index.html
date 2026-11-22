@@ -36,7 +36,7 @@
             </div>
             <div class="topbar-actions">
                 <span class="schedule-badge">
-                    <span class="status-dot" aria-hidden="true"></span>
+                    <span class="status-dot{% if setup_needed %} status-dot-pending{% endif %}" aria-hidden="true"></span>
                     <span id="schedule-label">{{ schedule_label }}</span>
                 </span>
                 <!-- 两个状态都写进标记，显示哪个交给 CSS（data-scheme 由 JS 同步）；
@@ -53,9 +53,9 @@
 
     <div class="container">
         {# 全系统唯一阈值 LOW_BALANCE_THRESHOLD；is_low 供横幅与主卡数字着色共用 #}
-        {% set is_low = stats.latest and stats.latest[2] is not none and stats.prediction.threshold and stats.latest[2] < stats.prediction.threshold %}
+        {% set is_low = stats.latest and stats.latest[2] is not none and stats.prediction.threshold is not none and stats.latest[2] < stats.prediction.threshold %}
         {% if is_low %}
-        <div class="alert-banner" id="lowBalanceBanner">
+        <div class="alert-banner" id="lowBalanceBanner" data-low="true"{% if stats.prediction.data_stale %} hidden{% endif %}>
             <span class="banner-icon" aria-hidden="true">⚠️</span>
             剩余电量 {{ "%.1f" | format(stats.latest[2]) }} 度，已低于预警阈值 {{ stats.prediction.threshold }} 度，请及时充值！
         </div>
@@ -71,11 +71,14 @@
                 <div class="balance-main">
                     <p class="balance-label">剩余电量</p>
                     <p class="balance-value">
-                        <strong id="current-balance" class="{% if is_low %}text-danger{% endif %}">{% if stats.latest and stats.latest[2] is not none %}{{ "%.2f" | format(stats.latest[2]) }}{% else %}--{% endif %}</strong>
+                        <strong id="current-balance" class="{% if is_low and not stats.prediction.data_stale %}text-danger{% endif %}">{% if stats.latest and stats.latest[2] is not none %}{{ "%.2f" | format(stats.latest[2]) }}{% else %}--{% endif %}</strong>
                         <small>度</small>
                     </p>
                     <p class="balance-note">
-                        {% if stats.free_pool %}含学校赠送 {{ "%.1f" | format(stats.free_pool) }} 度{% if stats.last_grant %}（{{ stats.last_grant.time[5:10] }} 到账）{% endif %}{% else %}低于设定阈值后自动发送邮件{% endif %}
+                        {% if stats.free_pool %}含学校赠送 {{ "%.1f" | format(stats.free_pool) }} 度{% if stats.last_grant %}（{{ stats.last_grant.time[5:10] }} 到账）{% endif %}{% elif setup_needed %}设置宿舍后开始查询{% else %}低于设定阈值时提醒{% endif %}
+                    </p>
+                    <p id="sample-stale" class="balance-note" role="status" data-stale-at="{{ stats.prediction.sample_stale_at or '' }}"{% if not stats.prediction.data_stale %} hidden{% endif %}>
+                        <strong class="text-warning">数据已过期</strong>，余额和预测基于上次成功采样。
                     </p>
                 </div>
                 {% if stats.free_pool and stats.latest and stats.latest[2] is not none and stats.latest[2] > 0 %}
@@ -152,7 +155,7 @@
                     <div class="prediction-metrics">
                         <div class="prediction-item">
                             <span class="prediction-label">预警阈值</span>
-                            <strong id="prediction-threshold">{{ "%.1f" | format(stats.prediction.threshold or 10.0) }}度</strong>
+                            <strong id="prediction-threshold">{{ "%.1f" | format(stats.prediction.threshold) }}度</strong>
                         </div>
                         <div class="prediction-item">
                             <span class="prediction-label">估计日均</span>
@@ -187,6 +190,15 @@
                     </div>
 
                     <div class="action-list">
+                        {% if setup_needed %}
+                        <button class="action-item action-primary" type="button" onclick="openSetup()">
+                            <span class="action-symbol" aria-hidden="true">⚙</span>
+                            <span class="action-copy">
+                                <strong>设置宿舍</strong>
+                                <small>填写统一认证账号和宿舍信息</small>
+                            </span>
+                        </button>
+                        {% else %}
                         <button class="action-item action-primary" type="button" onclick="checkNow(event)">
                             <span class="action-symbol" aria-hidden="true">↻</span>
                             <span class="action-copy">
@@ -203,6 +215,7 @@
                                 <small>调整阈值、邮箱和频率</small>
                             </span>
                         </button>
+                        {% endif %}
                         <a class="action-item" href="https://app.bupt.edu.cn/buptdf/wap/default/chong" target="_blank" rel="noopener noreferrer">
                             <span class="action-symbol" aria-hidden="true">↗</span>
                             <span class="action-copy">
@@ -215,6 +228,13 @@
                             <span class="action-copy">
                                 <strong class="btn-text">查看日志</strong>
                                 <small>检查自动任务运行情况</small>
+                            </span>
+                        </button>
+                        <button class="action-item action-update" type="button" onclick="openUpdateDialog()">
+                            <span class="action-symbol" aria-hidden="true">↑</span>
+                            <span class="action-copy">
+                                <strong>检查更新</strong>
+                                <small>当前版本 {{ app_version or '未知' }}</small>
                             </span>
                         </button>
                     </div>
@@ -231,10 +251,11 @@
                     <div>
                         <h2 id="trendHeading">电量趋势</h2>
                     </div>
-                    <div class="chart-tabs" role="tablist" aria-label="趋势时间范围">
-                        <button class="chart-tab" type="button" onclick="switchChart('hourly')" data-chart="hourly">24 小时</button>
-                        <button class="chart-tab active" type="button" onclick="switchChart('daily')" data-chart="daily">7 天</button>
-                        <button class="chart-tab" type="button" onclick="switchChart('monthly')" data-chart="monthly">30 天</button>
+                    <div class="chart-tabs" role="group" aria-label="趋势时间范围">
+                        <button class="chart-tab" type="button" aria-pressed="false" onclick="switchChart('hourly')" data-chart="hourly">24 小时</button>
+                        <button class="chart-tab active" type="button" aria-pressed="true" onclick="switchChart('daily')" data-chart="daily">7 天</button>
+                        <button class="chart-tab" type="button" aria-pressed="false" onclick="switchChart('monthly')" data-chart="monthly">30 天</button>
+                        <button class="chart-tab" type="button" aria-pressed="false" onclick="switchChart('all')" data-chart="all">全部</button>
                     </div>
                 </div>
 
@@ -246,6 +267,7 @@
                 </div>
                 <div class="chart-container" id="monthlyChartContainer" hidden>
                     <canvas id="monthlyChart"></canvas>
+                    <p id="balanceHistoryStatus" class="chart-history-status" role="status" hidden></p>
                 </div>
             </section>
 
@@ -254,14 +276,16 @@
                     <div>
                         <h2 id="usageHeading">每日用电量</h2>
                     </div>
-                    <div class="chart-tabs" role="tablist" aria-label="每日用量时间范围">
-                        <button class="chart-tab active" type="button" onclick="switchDailyUsageRange(7)" data-durange="7">近 7 天</button>
-                        <button class="chart-tab" type="button" onclick="switchDailyUsageRange(15)" data-durange="15">近 15 天</button>
-                        <button class="chart-tab" type="button" onclick="switchDailyUsageRange(30)" data-durange="30">近 30 天</button>
+                    <div class="chart-tabs" role="group" aria-label="每日用量时间范围">
+                        <button class="chart-tab active" type="button" aria-pressed="true" onclick="switchDailyUsageRange(7)" data-durange="7">近 7 天</button>
+                        <button class="chart-tab" type="button" aria-pressed="false" onclick="switchDailyUsageRange(15)" data-durange="15">近 15 天</button>
+                        <button class="chart-tab" type="button" aria-pressed="false" onclick="switchDailyUsageRange(30)" data-durange="30">近 30 天</button>
+                        <button class="chart-tab" type="button" aria-pressed="false" onclick="switchDailyUsageRange('all')" data-durange="all">全部</button>
                     </div>
                 </div>
                 <div class="chart-container">
                     <canvas id="dailyUsageChart"></canvas>
+                    <p id="usageHistoryStatus" class="chart-history-status" role="status" hidden></p>
                 </div>
             </section>
 
@@ -340,6 +364,45 @@
     </div>
 
     {# 原生模态对话框：top layer / 焦点圈定 / Esc 关闭均由浏览器提供，不再手写遮罩层 #}
+    {% if setup_needed %}
+    <dialog id="setupModal" class="dialog" aria-labelledby="setupTitle">
+        <div class="dialog-header">
+            <div>
+                <h2 id="setupTitle">首次设置宿舍</h2>
+                <p class="section-sub">西土城校区</p>
+            </div>
+            <form method="dialog">
+                <button class="dialog-close" type="submit" aria-label="关闭首次设置">×</button>
+            </form>
+        </div>
+        <form id="setupForm" method="post" action="/api/setup">
+            <div class="form-group">
+                <label for="setupUsername">统一身份认证学号</label>
+                <input id="setupUsername" name="username" type="text" autocomplete="username" required autofocus>
+            </div>
+            <div class="form-group">
+                <label for="setupPassword">统一身份认证密码</label>
+                <input id="setupPassword" name="password" type="password" autocomplete="current-password" required>
+            </div>
+            <div class="form-group">
+                <label for="setupApartment">公寓名称</label>
+                <input id="setupApartment" name="apartment" type="text" placeholder="填写学校电费页面上的公寓名称" required>
+            </div>
+            <div class="form-group">
+                <label for="setupRoom">房间号</label>
+                <input id="setupRoom" name="room" type="text" placeholder="填写完整房间号，例如 10-1001" required>
+            </div>
+            <p id="setupStatus" class="update-status" role="status" hidden></p>
+            <div class="dialog-actions">
+                <button class="btn btn-primary" type="submit">
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span class="btn-text">核对并保存</span>
+                </button>
+            </div>
+        </form>
+    </dialog>
+    {% endif %}
+
     <dialog id="settingsModal" class="dialog" closedby="any" aria-labelledby="settingsTitle">
         <div class="dialog-header">
             <div>
@@ -361,7 +424,7 @@
             <div class="form-group">
                 <label for="emails">提醒邮箱</label>
                 <textarea id="emails" name="emails" placeholder="每行输入一个邮箱地址" aria-describedby="emails-help"></textarea>
-                <small id="emails-help">支持添加多个邮箱，每行填写一个。</small>
+                <small id="emails-help">每行填写一个邮箱。留空则关闭邮件提醒。</small>
             </div>
             <div class="form-group">
                 <label for="checkFrequency">检查频率</label>
@@ -392,6 +455,26 @@
                 <button type="submit" value="confirm" class="btn btn-danger">确定</button>
             </div>
         </form>
+    </dialog>
+
+    <dialog id="updateDialog" class="dialog" closedby="any" aria-labelledby="updateTitle">
+        <div class="dialog-header">
+            <div>
+                <h2 id="updateTitle">软件更新</h2>
+                <p class="section-sub">当前版本 {{ app_version or '未知' }}</p>
+            </div>
+            <form method="dialog">
+                <button class="dialog-close" type="submit" aria-label="关闭软件更新">×</button>
+            </form>
+        </div>
+        <p id="updateStatus" class="update-status" role="status"></p>
+        <div class="dialog-actions">
+            <a id="updateReleaseLink" class="btn btn-soft" target="_blank" rel="noopener noreferrer" hidden>查看发布说明</a>
+            <button id="checkUpdateButton" class="btn btn-primary" type="button" onclick="checkForUpdates()">
+                <span class="spinner" aria-hidden="true"></span>
+                <span class="btn-text">重新检查</span>
+            </button>
+        </div>
     </dialog>
 
     <div id="chartData"

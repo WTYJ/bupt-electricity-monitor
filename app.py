@@ -11,25 +11,31 @@
 - app.py      本文件：装配与定时任务调度
 """
 
-import atexit
+import argparse
 import logging
+import socket
+import sys
+import webbrowser
 from datetime import datetime
+from pathlib import Path
+from threading import Thread
+from time import monotonic, sleep
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from werkzeug.serving import ThreadedWSGIServer
+from config_io import check_frequency_minutes, initial_config, loopback_host, setup_required
+from instance import InstanceAlreadyRunning, active_dashboard_url, register_instance
 
-# 导入配置（缺少或未填写时给出明确提示后退出）
+PROJECT_DIR = Path(__file__).resolve().parent
+
+# 首次启动先加载内存配置，浏览器完成宿舍设置后才落盘。
 try:
     import config
-except ImportError:
-    print("请先配置config.py文件，填写用户名、密码等信息")
-    print("可以复制config.py.example为config.py并填写实际信息")
-    exit(1)
-
-if (hasattr(config, 'BUPT_USERNAME') and config.BUPT_USERNAME == "你的学号") or \
-   (hasattr(config, 'EMAIL_USERNAME') and config.EMAIL_USERNAME == "你的邮箱@qq.com"):
-    print("请先在config.py中填写实际的用户名、密码等信息！")
-    print("当前配置文件中仍然是示例值，请修改为实际值")
-    exit(1)
+except ModuleNotFoundError as exc:
+    if exc.name != 'config':
+        raise
+    config = initial_config(PROJECT_DIR / 'config.py')
+    sys.modules['config'] = config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,36 +65,26 @@ def set_monitor(instance):
 
 def setup_scheduler():
     """按配置设置定时检查任务（可重复调用，用于配置变更后重新调度）"""
-    # 清除可能存在的旧任务
-    for job in scheduler.get_jobs():
-        if job.id == 'electric_check':
-            scheduler.remove_job('electric_check')
-
-    frequency = getattr(config, 'CHECK_FREQUENCY_MINUTES', None)
-    try:
-        frequency = int(frequency)
-    except (TypeError, ValueError):
-        frequency = None
+    if setup_required(config):
+        logging.info("请在仪表盘完成首次设置后启动自动检查")
+        return
+    frequency = check_frequency_minutes(config)
 
     job_kwargs = dict(
         func=scheduled_check,
         id='electric_check',
+        replace_existing=True,
         max_instances=1,
         coalesce=True,
         misfire_grace_time=300,
         next_run_time=datetime.now(),  # 启动/改配置后立即执行首次检查
     )
-    if frequency and frequency != 60:
+    if frequency != 60:
         scheduler.add_job(trigger='interval', minutes=frequency, **job_kwargs)
         logging.info(f"定时任务已设置：每{frequency}分钟检查剩余电量，首次检查立即执行")
     else:
         scheduler.add_job(trigger='cron', minute=0, **job_kwargs)
         logging.info("定时任务已设置：每小时整点检查剩余电量，首次检查立即执行")
-
-    # 注册退出时关闭调度器（仅注册一次）
-    if not getattr(setup_scheduler, '_exit_registered', False):
-        atexit.register(lambda: scheduler.shutdown())
-        setup_scheduler._exit_registered = True
 
 
 def scheduled_check():
@@ -97,16 +93,49 @@ def scheduled_check():
     if monitor is None:
         logging.error("定时检查跳过 - 监控实例尚未初始化")
         return
+    from monitor import CheckInProgress, run_check
     try:
-        from monitor import run_check
         result = run_check(monitor)
         if not result:
             logging.error("定时检查失败 - 无法获取数据")
+    except CheckInProgress:
+        logging.info("已有检查正在进行，本次定时检查跳过")
     except Exception as e:
         logging.error(f"定时检查出错: {str(e)}")
 
 
-if __name__ == '__main__':
+class LocalDashboardServer(ThreadedWSGIServer):
+    # Windows SO_REUSEADDR 允许同一地址出现两个监听者，仪表盘需要独占监听端口。
+    allow_reuse_address = not hasattr(socket, 'SO_EXCLUSIVEADDRUSE')
+
+    def server_bind(self):
+        if not self.allow_reuse_address:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def open_dashboard(url):
+    try:
+        if webbrowser.open(url):
+            return
+    except (OSError, webbrowser.Error):
+        pass
+    logging.info("请在浏览器中打开 %s", url)
+
+
+def open_running_dashboard():
+    deadline = monotonic() + 5
+    while monotonic() < deadline:
+        url = active_dashboard_url(PROJECT_DIR)
+        if url:
+            open_dashboard(url)
+            return True
+        sleep(0.1)
+    logging.info("电费监控的网页尚未就绪")
+    return False
+
+
+def main(registration=None, open_browser=False):
     # 初始化数据库并创建监控实例
     import storage
     storage.init_db()
@@ -116,16 +145,48 @@ if __name__ == '__main__':
 
     set_monitor(ElectricMonitor())
 
-    # 启动定时任务调度器
-    setup_scheduler()
-    if not scheduler.running:
+    app = create_app(monitor, reschedule=setup_scheduler)
+    app.debug = getattr(config, 'DEBUG_MODE', False)
+    configured_host = getattr(config, 'WEB_HOST', None)
+    host = loopback_host(configured_host)
+    if configured_host is not None and configured_host != host:
+        logging.info("仪表盘仅监听本机，已使用 %s", host)
+    with LocalDashboardServer(host, int(getattr(config, 'WEB_PORT', 5100)), app) as server:
+        address = server.server_address[0]
+        url_host = f'[{address}]' if ':' in address else address
+        url = f'http://{url_host}:{server.server_port}/'
+        setup_scheduler()
         scheduler.start()
         logging.info("定时任务调度器已启动")
+        try:
+            server.log_startup()
+            if registration is not None:
+                with registration.open('a', encoding='ascii') as handle:
+                    handle.write(f'{url}\n')
+            if open_browser:
+                Thread(target=open_dashboard, args=(url,), daemon=True).start()
+            server.serve_forever()
+        finally:
+            scheduler.shutdown()
 
-    app = create_app(monitor, reschedule=setup_scheduler)
-    debug_mode = getattr(config, 'DEBUG_MODE', False)
-    # use_reloader=False：Flask reloader 会重启整个进程，导致调度器双份运行、重复查询
-    app.run(host=getattr(config, 'WEB_HOST', '0.0.0.0'),
-            port=getattr(config, 'WEB_PORT', 5100),
-            debug=debug_mode,
-            use_reloader=False)
+
+def launch():
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--open-browser', action='store_true')
+    mode.add_argument('--open-existing', action='store_true')
+    args = parser.parse_args()
+    if args.open_existing:
+        sys.exit(0 if open_running_dashboard() else 1)
+
+    try:
+        with register_instance(PROJECT_DIR) as registration:
+            main(registration, open_browser=args.open_browser)
+    except InstanceAlreadyRunning:
+        logging.info("本项目的电费监控已在运行")
+        if args.open_browser:
+            sys.exit(0 if open_running_dashboard() else 1)
+
+
+if __name__ == '__main__':
+    launch()

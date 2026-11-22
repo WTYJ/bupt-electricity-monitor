@@ -9,7 +9,9 @@
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta
+from threading import Lock
 
 import requests
 from bs4 import BeautifulSoup
@@ -17,6 +19,7 @@ from bs4 import BeautifulSoup
 import config
 import notifier
 import storage
+from config_io import check_frequency_minutes
 
 ELECTRIC_PAGE_URL = "https://app.bupt.edu.cn/buptdf/wap/default/chong"
 ELECTRIC_SEARCH_URL = "https://app.bupt.edu.cn/buptdf/wap/default/search"
@@ -25,6 +28,11 @@ LOGIN_URL = "https://auth.bupt.edu.cn/authserver/login"
 # 校园电费充值固定档位（度）。充值后到下次查询之间仍在用电，
 # 观测到的余额增量会略小于实际购电量，故按"向上取最近档位"还原真实充值额。
 RECHARGE_TIERS = (25, 50, 75, 100, 150, 200)
+_check_lock = Lock()
+
+
+class CheckInProgress(RuntimeError):
+    """同一监控实例已有检查在运行。"""
 
 
 def snap_recharge_amount(diff):
@@ -162,9 +170,16 @@ class ElectricMonitor:
                     return None
 
                 # 学校赠送池（freeEnd）优先扣费：真实可用电量 = 付费余额 + 赠送余量
+                surplus_value = raw_data.get('surplus')
+                if surplus_value is None or isinstance(surplus_value, bool):
+                    raise ValueError('缺少有效付费余量 surplus')
+                surplus = float(surplus_value)
                 free_pool = float(raw_data.get('freeEnd') or 0)
+                balance = surplus + free_pool
+                if not math.isfinite(balance):
+                    raise ValueError('付费或赠送余量不是有限数值')
                 data = {
-                    'balance': float(raw_data.get('surplus', 0)) + free_pool,  # 总可用电量(度)
+                    'balance': balance,  # 总可用电量(度)
                     'free_pool': free_pool,  # 其中学校赠送部分(度)
                     'total_usage': float(raw_data.get('totalActiveDisp') or 0),  # 电表累计示数(度)。注意: vTotal是电压不是用电量
                     'power': float(raw_data.get('pTotal') or 0),  # 实时有功功率(千瓦)
@@ -191,7 +206,7 @@ class ElectricMonitor:
                 logging.error(f"电费数据JSON解析失败: {e}")
                 logging.error(f"响应内容: {response.text[:500]}")
                 return None
-            except (ValueError, KeyError) as e:
+            except (TypeError, ValueError, KeyError) as e:
                 logging.error(f"电费数据解析错误: {e}")
                 return None
 
@@ -331,42 +346,51 @@ class ElectricMonitor:
         Returns:
             float: 本月累计度数；本月完全没有可用区间时才返回 0.0
         """
-        # 覆盖「本月 + 跨月边界的上一个区间起点」；35 天足够（最长月 31 天）
-        daily = self.daily_usage_trend(35)
-        prefix = datetime.now().strftime('%Y-%m-')
+        month_start = datetime.combine(datetime.now().date().replace(day=1), datetime.min.time())
+        daily = self._daily_usage_from(month_start)
+        prefix = month_start.strftime('%Y-%m-')
         return round(sum(v for k, v in daily if k.startswith(prefix)), 2)
 
-    def collect_usage_intervals(self, lookback_days=30):
-        """读取最近 lookback_days 天的历史记录并切分成用电样本"""
-        cutoff = (datetime.now() - timedelta(days=lookback_days)).strftime('%Y-%m-%d %H:%M:%S')
-        return self._samples_since(cutoff)
+    def collect_usage_intervals(self, lookback_days=30, *, sampled_at=None):
+        """读取以当前时间或指定采样时间为终点的用电样本。"""
+        end = sampled_at if sampled_at is not None else datetime.now()
+        cutoff = (end - timedelta(days=lookback_days)).strftime('%Y-%m-%d %H:%M:%S')
+        until = sampled_at.strftime('%Y-%m-%d %H:%M:%S') if sampled_at is not None else None
+        return self._samples_since(cutoff, until)
 
     def daily_usage_trend(self, days=30):
         """最近 N 天的每日用电量序列，[[label, 度], ...] 按日期升序。
+        days 为 None 时返回完整历史。
 
         区间用电按时间占比线性分摊到所跨越的每个自然日：
         - 记录密集的时段（每30分钟一条）得到精确值
         - 服务停跑等数据空档，由跨越空档的区间按天数线性均摊（即用前后数据估算）
         - 消耗口径为双池拆分（见 _pool_intervals），赠送期间用量同样正确
         """
-        # 多取一天的数据，保证窗口首日的用量完整（跨零点的区间能对上）
-        cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d 00:00:00')
-        start_label = (datetime.now() - timedelta(days=days - 1)).strftime('%Y-%m-%d')
+        if days is None:
+            return self._daily_usage_from(None)
+        start_date = datetime.now().date() - timedelta(days=days - 1)
+        return self._daily_usage_from(datetime.combine(start_date, datetime.min.time()))
 
+    def _daily_usage_from(self, cutoff):
         alloc = {}
-        for start, end, span, drop in self._pool_intervals(cutoff):
-            span_seconds = span * 86400.0
-            # 按各自然日占该区间的时长比例线性分摊
-            d = start.date()
-            while d <= end.date():
-                seg_start = max(start, datetime.combine(d, datetime.min.time()))
-                seg_end = min(end, datetime.combine(d + timedelta(days=1), datetime.min.time()))
-                seg = (seg_end - seg_start).total_seconds()
-                if seg > 0:
-                    key = d.strftime('%Y-%m-%d')
-                    alloc[key] = alloc.get(key, 0.0) + drop * seg / span_seconds
-                d += timedelta(days=1)
-        return [[k, round(v, 2)] for k, v in sorted(alloc.items()) if k >= start_label]
+        for day, _, usage in self._usage_segments(cutoff):
+            alloc[day] = alloc.get(day, 0.0) + usage
+        return [[day, round(usage, 2)] for day, usage in alloc.items()]
+
+    def _usage_segments(self, cutoff):
+        """按自然日分摊窗口内的用电区间，产出日期、片段终点和用量。"""
+        cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S') if cutoff is not None else None
+        for start, end, _, drop in self._pool_intervals(cutoff_str, include_previous=True):
+            span_seconds = (end - start).total_seconds()
+            segment_start = max(start, cutoff) if cutoff is not None else start
+            while segment_start < end:
+                day = segment_start.date()
+                midnight = datetime.combine(day + timedelta(days=1), datetime.min.time())
+                segment_end = min(end, midnight)
+                seconds = (segment_end - segment_start).total_seconds()
+                yield day.isoformat(), segment_end, drop * seconds / span_seconds
+                segment_start = segment_end
 
     def usage_since(self, since_str, until_str=None):
         """计算自 since_str（可选到 until_str）以来的用电量（度）。
@@ -379,27 +403,22 @@ class ElectricMonitor:
         return round(sum(s['drop'] for s in samples), 2)
 
     def usage_curve_since(self, since_str):
-        """自 since_str 起的"累计用电量曲线"，供调用方按时间点查表。
-
-        Returns:
-            (ends, cums)：ends 为各区间终点（'YYYY-MM-DD HH:MM:SS'，升序），
-            cums[i] 为截至 ends[i] 的累计用电量（未取整的浮点和）。
-            查表方式：ends 中 <= 某时间戳的最后一段即该时点的累计值；
-            曲线为空表示窗口内没有可用区间（对应 usage_since 的 None）。
-
-        动机：首页"最近记录"表格要按每条记录的时间算"截至该时的本月用量"，
-        旧实现逐条调 usage_since(until)，每行都重读整月历史并重新解析全部
-        raw_data。区间切分与记录时间无关，切一次即可整体复用。
-        """
+        """返回按时间升序的片段终点和累计用量，供最近记录表一次切区间后查表。"""
         ends, cums = [], []
-        total = 0.0
-        for s in self._samples_since(since_str):
-            total += s['drop']
-            ends.append(s['end'])
-            cums.append(total)
+        previous_day = None
+        completed_days = 0.0
+        day_usage = 0.0
+        for day, end, usage in self._usage_segments(datetime.fromisoformat(since_str)):
+            if day != previous_day:
+                completed_days += round(day_usage, 2)
+                day_usage = 0.0
+                previous_day = day
+            day_usage += usage
+            ends.append(end.strftime('%Y-%m-%d %H:%M:%S'))
+            cums.append(round(completed_days + round(day_usage, 2), 2))
         return ends, cums
 
-    def _pool_intervals(self, cutoff_str, until_str=None):
+    def _pool_intervals(self, cutoff_str, until_str=None, *, include_previous=False):
         """相邻记录对的用电区间：(start, end, span天, 消耗度数)。
 
         学校赠送池（freeEnd）优先扣费，消耗按两个池子分别计算再相加：
@@ -408,7 +427,7 @@ class ElectricMonitor:
         - 折算日均超过 PREDICTION_MAX_DAILY_RATE 的区间视为异常丢弃
         """
         try:
-            rows = storage.balances_with_raw_since(cutoff_str)
+            rows = storage.balances_with_raw_since(cutoff_str, include_previous=include_previous)
         except Exception as e:
             logging.error(f"读取历史记录失败: {str(e)}")
             return []
@@ -475,7 +494,7 @@ class ElectricMonitor:
             return 0.0, 0.0
         return total_drop / total_span, total_span
 
-    def _select_prediction_window(self):
+    def _select_prediction_window(self, sampled_at):
         """选择预测窗口：优先最短窗口，样本不足时逐级放宽。
 
         动机：宿舍用电受气温/空调驱动，用电状态变化很快（如降温后停用空调）。
@@ -503,7 +522,7 @@ class ElectricMonitor:
         candidates.sort()
 
         for days in candidates:
-            samples = self.collect_usage_intervals(days)
+            samples = self.collect_usage_intervals(days, sampled_at=sampled_at)
             if not samples:
                 continue
             total_span = sum(s['span'] for s in samples)
@@ -511,7 +530,7 @@ class ElectricMonitor:
                 return samples, days, days != primary
 
         # 全部不满足：返回最长窗口的原始样本，由调用方按观测时长判定是否可用
-        return self.collect_usage_intervals(lookback), lookback, True
+        return self.collect_usage_intervals(lookback, sampled_at=sampled_at), lookback, True
 
     def predict(self, threshold=None):
         """预测剩余电量消耗节奏（统一入口，按数据成熟度自动选择精度）。
@@ -519,7 +538,8 @@ class ElectricMonitor:
         字段语义：
         - days_remaining：预计电量**耗尽**（降到 0）的天数
         - days_to_threshold：预计降到阈值以下的天数（预测预警邮件用它触发）
-        - predicted_date：预计降到阈值以下的日期（页面"预计到达预警线"）
+        - predicted_date：从最后一次成功采样外推的预警日期
+        - data_stale：距最后一次成功采样达到两个检查周期
         - window_days：本次实际使用的观测窗口天数
 
         窗口策略（宿舍用电主要由气温/空调驱动，星期几规律弱，不做日历分型）：
@@ -549,14 +569,20 @@ class ElectricMonitor:
                 result['message'] = '无法获取当前剩余电量，预测失败'
                 return result
 
+            sampled_at = datetime.fromisoformat(str(latest[1]))
+            now = datetime.now()
+            stale_at = sampled_at + timedelta(minutes=2 * check_frequency_minutes(config))
+            elapsed_days = max(0.0, (now - sampled_at).total_seconds() / 86400)
             current_balance = float(latest[2])
-            result['current_balance'] = current_balance
-
-            # 已低于阈值时预警线日期就是今天，但耗尽时间仍需按历史速率估计
-            already_below = current_balance <= threshold
+            result.update(
+                current_balance=current_balance,
+                sample_time=str(latest[1]),
+                sample_stale_at=int(stale_at.timestamp() * 1000),
+                data_stale=now >= stale_at,
+            )
 
             # ── 窗口选择：优先用最近的短窗口，样本不足时自动放宽 ──
-            samples, window_days, used_fallback = self._select_prediction_window()
+            samples, window_days, used_fallback = self._select_prediction_window(sampled_at)
             result['window_days'] = window_days
 
             if not samples:
@@ -609,11 +635,11 @@ class ElectricMonitor:
             quality = coverage * (0.6 if used_fallback else 1.0)
             confidence = 'high' if quality > 0.7 else ('medium' if quality > 0.4 else 'low')
 
-            # 线性外推：耗尽时间 = 剩余电量 ÷ 估计日均；已低于阈值时预警线日期就是今天
-            days_to_deplete = current_balance / rate
-            days_to_threshold = 0.0 if already_below else max(remaining, 0.0) / rate
+            # 从采样时刻外推日期，再扣除采样后已经过去的时间。
+            days_from_sample_to_deplete = max(current_balance, 0.0) / rate
+            days_from_sample_to_threshold = max(remaining, 0.0) / rate
 
-            if days_to_deplete > 3650:
+            if days_from_sample_to_deplete > 3650:
                 result.update({
                     'success': True,
                     'message': f'按日均{rate:.2f}度消耗，剩余电量一年以上才会耗尽',
@@ -622,7 +648,9 @@ class ElectricMonitor:
                 })
                 return result
 
-            predicted_date = (datetime.now() + timedelta(days=int(days_to_threshold))).strftime('%Y-%m-%d')
+            predicted_date = (sampled_at + timedelta(days=days_from_sample_to_threshold)).strftime('%Y-%m-%d')
+            days_to_deplete = max(0.0, days_from_sample_to_deplete - elapsed_days)
+            days_to_threshold = max(0.0, days_from_sample_to_threshold - elapsed_days)
 
             logging.info(f"电量预测完成({method}, 窗口{window_days}天): 剩余电量={current_balance}度, "
                          f"估计日均={rate:.2f}度(基于{len(samples)}个记录间隔/共{observed_days:.2f}天), "
@@ -661,6 +689,9 @@ def failed_prediction(message, threshold=None):
         'success': False,
         'message': message,
         'current_balance': 0.0,
+        'sample_time': None,
+        'sample_stale_at': None,
+        'data_stale': False,
         'threshold': threshold,
         'days_remaining': None,
         'days_to_threshold': None,
@@ -680,27 +711,33 @@ def run_check(monitor):
     Returns:
         dict: {'data': 采集数据, 'prediction': 预测结果}，采集失败返回 None
     """
-    data = monitor.get_electric_data()
-    if not data:
-        return None
+    if not _check_lock.acquire(blocking=False):
+        raise CheckInProgress
+    try:
+        data = monitor.get_electric_data()
+        if not data:
+            return None
 
-    storage.save_record(data)
+        storage.save_record(data)
 
-    threshold = float(config.LOW_BALANCE_THRESHOLD)
-    balance = float(data['balance'])
+        threshold = float(config.LOW_BALANCE_THRESHOLD)
+        balance = float(data['balance'])
 
-    # 传统低余额预警
-    if balance < threshold:
-        notifier.send_low_balance_alert(balance, threshold)
+        # 传统低余额预警
+        if balance < threshold:
+            notifier.send_low_balance_alert(balance, threshold)
 
-    # 预测预警
-    prediction = monitor.predict(threshold)
+        # 预测预警
+        prediction = monitor.predict(threshold)
 
-    alert_days = int(getattr(config, 'PREDICTION_ALERT_DAYS', 7))
-    if (prediction.get('success') and
-            prediction.get('days_to_threshold') is not None and
-            prediction.get('days_to_threshold') <= alert_days):
-        notifier.send_prediction_alert(prediction, alert_days)
+        alert_days = int(getattr(config, 'PREDICTION_ALERT_DAYS', 7))
+        if (prediction.get('success') and
+                not prediction.get('data_stale') and
+                prediction.get('days_to_threshold') is not None and
+                prediction.get('days_to_threshold') <= alert_days):
+            notifier.send_prediction_alert(prediction, alert_days)
 
-    logging.info(f"检查完成 - 剩余电量: {balance}度")
-    return {'data': data, 'prediction': prediction}
+        logging.info(f"检查完成 - 剩余电量: {balance}度")
+        return {'data': data, 'prediction': prediction}
+    finally:
+        _check_lock.release()

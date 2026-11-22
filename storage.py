@@ -99,17 +99,31 @@ def backfill_balance_with_free_pool():
             logging.info(f"历史记录回填完成：{updated} 条记录的余额已并入学校赠送池")
 
 
-def balances_with_raw_since(cutoff):
-    """晚于 cutoff 的 (timestamp, balance, raw_data)，按时间升序。
+def balances_with_raw_since(cutoff, *, include_previous=False):
+    """从 cutoff 起的 (timestamp, balance, raw_data)，按时间升序。
 
     balance 为总可用电量（付费+赠送）；raw_data 用于拆分两个池子各自的消耗。
+    cutoff 为 None 时读取全部历史。指定边界且 include_previous 为 True 时，
+    额外读取边界前一条有效记录，以便分摊跨窗口的用量。
     """
+    before_cutoff = ''
+    cutoff_filter = ''
+    params = ()
+    if cutoff is not None and include_previous:
+        before_cutoff = '''OR id = (
+            SELECT id FROM electric_records
+            WHERE balance IS NOT NULL AND timestamp < ?
+            ORDER BY timestamp DESC, id DESC LIMIT 1
+        )'''
+    if cutoff is not None:
+        cutoff_filter = f'AND (timestamp >= ? {before_cutoff})'
+        params = (cutoff, cutoff) if include_previous else (cutoff,)
     with _connect() as conn:
-        return conn.execute('''
+        return conn.execute(f'''
             SELECT timestamp, balance, raw_data FROM electric_records
-            WHERE balance IS NOT NULL AND timestamp >= ?
-            ORDER BY timestamp ASC
-        ''', (cutoff,)).fetchall()
+            WHERE balance IS NOT NULL AND timestamp IS NOT NULL {cutoff_filter}
+            ORDER BY timestamp ASC, id ASC
+        ''', params).fetchall()
 
 
 # ── electric_records ──────────────────────────────────────────────
@@ -139,7 +153,7 @@ def latest_record():
         return conn.execute('''
             SELECT * FROM electric_records
             WHERE balance IS NOT NULL
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, id DESC
             LIMIT 1
         ''').fetchone()
 
@@ -154,7 +168,7 @@ def recent_records(limit=20):
         ''', (limit,)).fetchall()
 
 
-def balance_trend(bucket_expr, since_expr, drop_early_tail=False):
+def balance_trend(bucket_expr, since_expr=None, drop_early_tail=False):
     """按时间粒度聚合的余额趋势：每个分组的点是该组**最晚一条记录**的余额
     （当天结束时剩多少度），而不是全组平均——平均值会产生一天中任何
     时刻都不存在的数字，且充值日会被严重拉偏。
@@ -165,18 +179,21 @@ def balance_trend(bucket_expr, since_expr, drop_early_tail=False):
     drop_early_tail=True（仅按天分组用）：跳过"当日最晚记录在中午之前"的停服日
     ——这种日子的最晚记录其实是当天起点，画出来会造成假平台（如整天停服时
     日末余额未知）；跳过后折线直接跨过停服日。最新一天（进行中）始终保留。
+    since_expr 为 None 时从最早记录开始聚合。
     """
+    where = 'balance IS NOT NULL'
+    params = ()
+    if since_expr is not None:
+        where += " AND timestamp > datetime('now', 'localtime', ?)"
+        params = (since_expr,)
     tail_filter = ''
-    params = [since_expr]
     if drop_early_tail:
-        tail_filter = '''
+        tail_filter = f'''
               AND NOT (
                   CAST(strftime('%H', timestamp) AS INTEGER) < 12
-                  AND label <> (SELECT MAX({g}) FROM electric_records
-                                WHERE timestamp > datetime('now', 'localtime', ?)
-                                AND balance IS NOT NULL)
-              )'''.format(g=bucket_expr)
-        params.append(since_expr)
+                  AND label <> (SELECT MAX({bucket_expr}) FROM electric_records WHERE {where})
+              )'''
+        params += params
     with _connect() as conn:
         return conn.execute(f'''
             SELECT label, balance FROM (
@@ -186,10 +203,9 @@ def balance_trend(bucket_expr, since_expr, drop_early_tail=False):
                            ORDER BY timestamp DESC
                        ) AS rn
                 FROM electric_records
-                WHERE timestamp > datetime('now', 'localtime', ?)
-                AND balance IS NOT NULL
+                WHERE {where}
             )
-            WHERE rn = 1 {tail_filter}
+            WHERE rn = 1 AND label IS NOT NULL {tail_filter}
             ORDER BY label
         ''', params).fetchall()
 

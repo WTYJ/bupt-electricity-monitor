@@ -1,13 +1,13 @@
 # 配置文件示例 - 复制为config.py并填写实际信息
-# 也可以运行 python setup_config.py 使用配置向导自动生成
+# 首次使用可通过仪表盘或 python setup_config.py 自动生成
 
 # 北邮统一身份认证用户名和密码
 BUPT_USERNAME = "你的学号"        # 例如: "2021000000"
 BUPT_PASSWORD = "你的密码"        # 你的统一身份认证密码
 
 # 宿舍信息配置（推荐运行 python setup_config.py 自动查询，不要手抄他人配置）
-# 校区: 1=西土城, 2=沙河
-AREA_ID = 1                      # 校区ID：1=西土城，2=沙河
+# 首次设置使用西土城校区
+AREA_ID = 1
 # 公寓楼ID（需要查询具体楼ID）
 APARTMENT_ID = "你的公寓楼ID"     # 由查询工具返回的 32 位十六进制串
 # 楼层
@@ -31,7 +31,7 @@ LOW_BALANCE_THRESHOLD = 10.0
 # CHECK_FREQUENCY_MINUTES = 30
 
 # Web服务配置
-WEB_HOST = "0.0.0.0"  # 监听所有网络接口，只想本机访问改成 "127.0.0.1"
+WEB_HOST = "127.0.0.1"  # 仅允许本机回环地址
 WEB_PORT = 5100       # Web服务端口
 DEBUG_MODE = False    # 调试模式（保持False，True会导致调度器重复运行）
 

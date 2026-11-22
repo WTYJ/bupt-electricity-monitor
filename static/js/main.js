@@ -2,6 +2,10 @@
 let hourlyChartData, dailyChartData, dailyUsageData = [];
 let currentChart = 'daily'; // 当前显示的图表类型
 let dailyUsageRange = 7; // 每日用电量柱状图的时间范围（天）
+let chartHistory;
+let chartHistoryLoading = false;
+let chartHistoryFailed = false;
+const chartRangeStorageKey = 'electricity-chart-ranges';
 
 // ── 主题（color-scheme meta 方案）─────────────────────────────
 // 三态数据模型：localStorage 无值 = 跟随系统；'light'/'dark' = 手动固定。
@@ -51,8 +55,15 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // 初始化图表和设置
-    drawCharts();
+    restoreChartRanges();
+    updateSampleFreshness();
     loadSettings();
+
+    const setupForm = document.getElementById('setupForm');
+    if (setupForm) {
+        setupForm.addEventListener('submit', submitSetup);
+        openSetup();
+    }
 
     // 设置表单提交（与首屏初始化共用同一个 DOMContentLoaded 监听）
     const settingsForm = document.getElementById('settingsForm');
@@ -98,6 +109,39 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
+
+function openSetup() {
+    const dialog = document.getElementById('setupModal');
+    if (dialog && !dialog.open) dialog.showModal();
+}
+
+async function submitSetup(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    const status = document.getElementById('setupStatus');
+    setButtonLoading(button, true);
+    status.hidden = false;
+    status.textContent = '正在核对学校宿舍信息…';
+    try {
+        const response = await fetch('/api/setup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.fromEntries(new FormData(form))),
+        });
+        if (!response.ok) throw new Error('Setup request failed');
+        const data = await response.json();
+        if (data.success) {
+            location.reload();
+            return;
+        }
+        status.textContent = data.message;
+    } catch {
+        status.textContent = '暂时无法保存宿舍设置，请稍后重试。';
+    } finally {
+        setButtonLoading(button, false);
+    }
+}
 
 // 显示提示信息
 function showAlert(message, type = 'success') {
@@ -201,7 +245,13 @@ function refreshPrediction(event) {
     fetch('/api/prediction')
         .then(response => response.json())
         .then(data => {
+            const rendered = document.getElementById('last-update').textContent.trim();
+            if (data.sample_time && data.sample_time !== rendered) {
+                location.reload();
+                return;
+            }
             updatePredictionDisplay(data);
+            updateSampleFreshness();
             showAlert('预测数据已更新！', 'success');
         })
         .catch(error => {
@@ -211,6 +261,17 @@ function refreshPrediction(event) {
         .finally(() => {
             setButtonLoading(btn, false);
         });
+}
+
+function updateSampleFreshness() {
+    const notice = document.getElementById('sample-stale');
+    const staleAt = Number(notice.dataset.staleAt);
+    const stale = staleAt > 0 && Date.now() >= staleAt;
+    notice.hidden = !stale;
+
+    const lowBalance = document.getElementById('lowBalanceBanner');
+    lowBalance.hidden = stale || lowBalance.dataset.low !== 'true';
+    document.getElementById('current-balance').classList.toggle('text-danger', !lowBalance.hidden);
 }
 
 // 更新预测显示
@@ -352,7 +413,7 @@ function loadSettings() {
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                document.getElementById('threshold').value = data.config.threshold || 10.00;
+                document.getElementById('threshold').value = data.config.threshold ?? 10.00;
                 document.getElementById('emails').value = (data.config.emails || []).join('\n');
                 document.getElementById('checkFrequency').value = data.config.check_frequency || 30;
             }
@@ -362,33 +423,125 @@ function loadSettings() {
         });
 }
 
+function openUpdateDialog() {
+    document.getElementById('updateDialog').showModal();
+    checkForUpdates();
+}
+
+async function checkForUpdates() {
+    const button = document.getElementById('checkUpdateButton');
+    if (button.disabled) return;
+
+    const status = document.getElementById('updateStatus');
+    const releaseLink = document.getElementById('updateReleaseLink');
+    setButtonLoading(button, true);
+    status.textContent = '正在检查 GitHub 发布版本…';
+    releaseLink.hidden = true;
+    releaseLink.removeAttribute('href');
+
+    try {
+        const response = await fetch('/api/update', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Update request failed');
+        const data = await response.json();
+        status.textContent = data.message;
+        if (data.release_url) {
+            releaseLink.href = data.release_url;
+            releaseLink.hidden = false;
+        }
+    } catch {
+        status.textContent = '暂时无法检查更新，请稍后重试。';
+    } finally {
+        setButtonLoading(button, false);
+    }
+}
+
+function restoreChartRanges() {
+    let saved;
+    try {
+        saved = JSON.parse(sessionStorage.getItem(chartRangeStorageKey));
+    } catch {
+        // 浏览器禁用存储或过往数据损坏时使用默认范围。
+    }
+    const balance = ['hourly', 'daily', 'monthly', 'all'].includes(saved?.balance) ? saved.balance : 'daily';
+    const usage = [7, 15, 30, 'all'].includes(saved?.usage) ? saved.usage : 7;
+    switchChart(balance);
+    switchDailyUsageRange(usage);
+}
+
+function rememberChartRanges() {
+    try {
+        sessionStorage.setItem(chartRangeStorageKey, JSON.stringify({ balance: currentChart, usage: dailyUsageRange }));
+    } catch {
+        // 禁用存储时仍可切换当前页面的范围。
+    }
+}
+
 // 图表切换函数
 function switchChart(chartType) {
     // 只在"电量趋势"这组 tab 内切换 active——旧版误用 .chart-tab 会把
     // "每日用电量"的时间范围 tab 一并清掉 active（互踩 bug），已修
     document.querySelectorAll('[data-chart]').forEach(tab => {
-        tab.classList.remove('active');
+        const active = tab.dataset.chart === chartType;
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-pressed', active);
     });
-    document.querySelector(`[data-chart="${chartType}"]`).classList.add('active');
 
     // 切换图表容器显示（hidden 属性替代内联 display 样式）
     document.getElementById('hourlyChartContainer').hidden = chartType !== 'hourly';
     document.getElementById('dailyChartContainer').hidden = chartType !== 'daily';
-    document.getElementById('monthlyChartContainer').hidden = chartType !== 'monthly';
+    document.getElementById('monthlyChartContainer').hidden = chartType !== 'monthly' && chartType !== 'all';
 
     currentChart = chartType;
+    rememberChartRanges();
+    if (chartType === 'all') loadChartHistory();
     drawCharts();
 }
 
+// 两张图共用一次全量查询，切回短区间时仍可继续浏览。
+async function loadChartHistory() {
+    if (chartHistory || chartHistoryLoading) return;
+    chartHistoryLoading = true;
+    chartHistoryFailed = false;
+    try {
+        const response = await fetch('/api/charts/history', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Chart history request failed');
+        const data = await response.json();
+        if (!Array.isArray(data.balance_trend_daily) || !Array.isArray(data.daily_usage)) {
+            throw new Error('Invalid chart history');
+        }
+        chartHistory = data;
+    } catch {
+        chartHistoryFailed = true;
+    } finally {
+        chartHistoryLoading = false;
+        drawCharts();
+    }
+}
+
+function showChartHistoryStatus(canvasId, statusId, needsHistory) {
+    const status = document.getElementById(statusId);
+    const visible = needsHistory && !chartHistory;
+    document.getElementById(canvasId).hidden = visible;
+    status.hidden = !visible;
+    if (visible) {
+        const message = chartHistoryFailed ? '加载失败，点击“全部”重试' : '正在加载全部记录…';
+        if (status.textContent !== message) status.textContent = message;
+    }
+    return visible;
+}
+
 // 绘制所有图表
-// 三个 tab 共用同一份按天序列：7 天取尾部 7 点，30 天取全量（后端 -30 days）
 function drawCharts() {
     if (currentChart === 'hourly') {
         drawChart('hourlyChart', hourlyChartData, 'hourly');
     } else if (currentChart === 'daily') {
         drawChart('dailyChart', (dailyChartData || []).slice(-7), 'daily');
     } else {
-        drawChart('monthlyChart', dailyChartData, 'daily');
+        const all = currentChart === 'all';
+        if (!showChartHistoryStatus('monthlyChart', 'balanceHistoryStatus', all)) {
+            const balances = all ? chartHistory.balance_trend_daily : dailyChartData;
+            drawChart('monthlyChart', balances, all ? 'all' : 'daily');
+        }
     }
     drawDailyUsageChart();
 }
@@ -569,6 +722,7 @@ function drawChart(canvasId, chartData, chartType) {
     const LABEL_GAP_X = 6; // 相邻标签之间至少留出的水平间隙
 
     const buildLabel = (index) => {
+        if (chartType === 'all') return { text: points[index].label, full: false };
         if (chartType === 'hourly') {
             const date = new Date(String(points[index].label).replace(' ', 'T'));
             if (!Number.isFinite(date.getTime())) return { text: '', full: false };
@@ -661,11 +815,16 @@ window.addEventListener('resize', () => {
     resizeTimer = setTimeout(drawCharts, 120);
 });
 
-// 切换每日用电量柱状图的时间范围（数据始终是近30天序列，按需切片）
+// 短区间按需切片，“全部”使用完整日序列。
 function switchDailyUsageRange(days) {
-    document.querySelectorAll('[data-durange]').forEach(tab => tab.classList.remove('active'));
-    document.querySelector(`[data-durange="${days}"]`).classList.add('active');
+    document.querySelectorAll('[data-durange]').forEach(tab => {
+        const active = tab.dataset.durange === String(days);
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-pressed', active);
+    });
     dailyUsageRange = days;
+    rememberChartRanges();
+    if (days === 'all') loadChartHistory();
     drawDailyUsageChart();
 }
 
@@ -673,6 +832,8 @@ function switchDailyUsageRange(days) {
 function drawDailyUsageChart() {
     const canvas = document.getElementById('dailyUsageChart');
     if (!canvas) return;
+    const all = dailyUsageRange === 'all';
+    if (showChartHistoryStatus('dailyUsageChart', 'usageHistoryStatus', all)) return;
 
     const ctx = canvas.getContext('2d');
     const width = canvas.offsetWidth;
@@ -686,8 +847,8 @@ function drawDailyUsageChart() {
     ctx.clearRect(0, 0, width, height);
     const p = chartPalette();
 
-    const points = (dailyUsageData || [])
-        .slice(-dailyUsageRange)
+    const usage = all ? chartHistory.daily_usage : (dailyUsageData || []).slice(-dailyUsageRange);
+    const points = usage
         .map(item => ({ label: String(item[0]), value: Number(item[1]) }))
         .filter(item => Number.isFinite(item.value));
 
@@ -731,11 +892,14 @@ function drawDailyUsageChart() {
     }
 
     const n = points.length;
-    const slot = chartWidth / n;
+    const firstDay = Date.parse(points[0].label);
+    const days = all ? points.map(point => (Date.parse(point.label) - firstDay) / 86400000) : null;
+    const slot = chartWidth / (days ? days[n - 1] + 1 : n);
+    const slotLeft = index => margin.left + slot * (days ? days[index] : index);
     const barWidth = Math.min(slot * 0.62, 46);
 
     points.forEach((point, index) => {
-        const x = margin.left + slot * index + (slot - barWidth) / 2;
+        const x = slotLeft(index) + (slot - barWidth) / 2;
         const y = pointY(point.value);
         const h = margin.top + chartHeight - y;
 
@@ -762,18 +926,23 @@ function drawDailyUsageChart() {
     const valueNeeded = widestValue + LABEL_GAP;
     const valueStep = Math.max(1, Math.ceil(valueNeeded / slot));
 
+    const keepLabel = (index, step) => days
+        ? (days[n - 1] - days[index]) % step === 0
+        : index % step === 0 || index === n - 1;
     points.forEach((point, index) => {
-        if (index % valueStep !== 0 && index !== n - 1) return;
-        const x = margin.left + slot * index + slot / 2;
+        if (!keepLabel(index, valueStep)) return;
+        const x = slotLeft(index) + slot / 2;
         ctx.fillText(point.value.toFixed(1), x, pointY(point.value) - 6);
     });
 
-    // X轴日期标签：M/D，最后一根标"今日"；同样用实测宽度决定密度
+    // 全量视图显示年份；同样用实测宽度决定日期标签密度。
     ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.fillStyle = p.text;
+    const today = new Date().toDateString();
     const dateLabels = points.map((point, index) => {
-        if (index === n - 1) return '今日';
         const date = new Date(point.label + 'T00:00:00');
+        if (index === n - 1 && (!all || date.toDateString() === today)) return '今日';
+        if (all) return point.label;
         return Number.isFinite(date.getTime())
             ? (date.getMonth() + 1) + '/' + date.getDate()
             : '';
@@ -784,8 +953,8 @@ function drawDailyUsageChart() {
     const dateStep = Math.max(1, Math.ceil(dateNeeded / slot));
 
     points.forEach((point, index) => {
-        if (index % dateStep !== 0 && index !== n - 1) return;
-        const x = margin.left + slot * index + slot / 2;
+        if (!keepLabel(index, dateStep)) return;
+        const x = slotLeft(index) + slot / 2;
         const label = dateLabels[index];
         if (label) ctx.fillText(label, x, margin.top + chartHeight + 24);
     });
@@ -794,6 +963,7 @@ function drawDailyUsageChart() {
 // 数据新鲜度探针（每60秒）：只拉最新记录时间戳（/api/version 近零开销），
 // 发现新数据才整页刷新。任何原生对话框打开时都不打断（含确认框）。
 setInterval(() => {
+    updateSampleFreshness();
     if (document.querySelector('dialog[open]')) return;
     fetch('/api/version')
         .then(response => response.json())

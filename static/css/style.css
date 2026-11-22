@@ -432,6 +432,11 @@
         box-shadow: 0 0 0 4px color-mix(in oklab, var(--success) 18%, transparent);
     }
 
+    .status-dot-pending {
+        background: var(--warning);
+        box-shadow: 0 0 0 4px color-mix(in oklab, var(--warning) 18%, transparent);
+    }
+
     /* 主题切换：当前模式的相反选项可见，另一份 display:none（同时移出无障碍树） */
     .theme-toggle {
         display: inline-grid;
@@ -984,6 +989,7 @@
         border-radius: var(--radius-sm);
         font-size: 12px;
         font-weight: 650;
+        white-space: nowrap;
         transition: color 160ms ease, background-color 160ms ease;
     }
 
@@ -1004,6 +1010,17 @@
         border: 1px solid var(--line);
         border-radius: var(--radius-md);
         background: linear-gradient(180deg, var(--surface), var(--surface-soft));
+    }
+
+    .chart-history-status {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding-inline: 12px;
+        color: var(--chart-text);
+        font-size: 13px;
+        text-align: center;
     }
 
     /* 画布尺寸规则（项目硬性约定：新 canvas 必须加入本规则） */
@@ -1431,7 +1448,8 @@
         font-weight: 720;
     }
 
-    .confirm-message {
+    .confirm-message,
+    .update-status {
         margin-top: 10px;
         color: var(--text-soft);
         font-size: 13.5px;
@@ -1526,6 +1544,10 @@
             grid-template-columns: repeat(2, 1fr);
         }
 
+        .action-update {
+            grid-column: 1 / -1;
+        }
+
         .danger-link {
             align-self: end;
         }
@@ -1593,6 +1615,7 @@
 
         .chart-tab {
             flex: 1;
+            padding-inline: 6px;
         }
 
         .chart-container {

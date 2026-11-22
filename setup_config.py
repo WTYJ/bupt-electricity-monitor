@@ -5,9 +5,10 @@
 """
 
 import os
-import shutil
 import getpass
 from datetime import datetime
+
+from config_io import loopback_host, write_config
 
 
 def _load_existing_config():
@@ -24,58 +25,107 @@ def _load_existing_config():
         return {}
 
 
-def _lookup_room():
-    """交互式查询房间信息（校区+房间名 → 公寓ID/楼层/房间号）"""
+class RoomLookupError(RuntimeError):
+    """宿舍查询失败，消息可直接显示给用户。"""
+
+
+def find_room(username, password, area, target, *, apartment=None):
+    """查询学校宿舍参数。指定公寓名时要求公寓和房间精确匹配。"""
     import requests
     from bs4 import BeautifulSoup
 
-    s = requests.Session()
-    try:
-        login_url = "https://auth.bupt.edu.cn/authserver/login"
-        r = s.get(login_url, timeout=15)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        fd = lambda n: (soup.find('input', {'name': n}) or {}).get('value', '')
-        r = s.post(login_url, data={
-            'username': _lookup_room.username,
-            'password': _lookup_room.password,
-            'type': fd('type'), 'execution': fd('execution'), '_eventId': fd('_eventId'),
-        }, timeout=15)
-        if 'CAS Login' in r.text:
-            print("   ❌ 统一身份认证登录失败，无法自动查询房间")
-            return None
-        s.get("https://app.bupt.edu.cn/buptdf/wap/default/chong", timeout=15)
-    except Exception as e:
-        print(f"   ❌ 网络错误: {e}")
-        return None
-
-    area = (_lookup_room.area or '1').strip()
-    target = (_lookup_room.room_name or '').strip()
+    login_url = "https://auth.bupt.edu.cn/authserver/login"
+    base_url = "https://app.bupt.edu.cn/buptdf/wap/default"
+    target = target.strip().casefold()
     if not target:
-        print("   ❌ 未输入房间名")
-        return None
+        raise RoomLookupError('请输入房间号')
 
-    r = s.post("https://app.bupt.edu.cn/buptdf/wap/default/part", data={'areaid': area}, timeout=15)
-    apartments = r.json()['d']['data']
-    for apt in apartments:
-        apt_id = apt['partmentId']
-        r = s.post("https://app.bupt.edu.cn/buptdf/wap/default/floor",
-                   data={'partmentId': apt_id, 'areaid': area}, timeout=15)
-        floors = r.json()['d']['data']
-        for f in floors:
-            r = s.post("https://app.bupt.edu.cn/buptdf/wap/default/drom",
-                       data={'partmentId': apt_id, 'floorId': f['floorId'], 'areaid': area}, timeout=15)
-            for room in r.json()['d']['data']:
-                if target.lower() in str(room.get('dromNum', '')).lower() + str(room.get('dromName', '')).lower():
-                    print(f"   ✅ 找到: {apt['partmentName']} {f['floorName']}层 {room['dromName']}")
-                    return {
-                        'AREA_ID': int(area),
-                        'APARTMENT_ID': apt_id,
-                        'FLOOR_ID': str(f['floorId']),
-                        'ROOM_NUMBER': room['dromNum'],
-                        'EXPECTED_APARTMENT_NAME': apt['partmentName'],
-                    }
-    print(f"   ❌ 未找到房间 [{target}]，请确认房间名格式（如: 10-1001）")
-    return None
+    try:
+        with requests.Session() as session:
+            response = session.get(login_url, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            fields = {
+                name: soup.find('input', {'name': name})
+                for name in ('type', 'execution', '_eventId')
+            }
+            if any(field is None for field in fields.values()):
+                raise RoomLookupError('暂时无法打开学校登录页，请稍后重试')
+            credentials = {name: field.get('value', '') for name, field in fields.items()}
+            credentials.update(username=username, password=password)
+            response = session.post(login_url, data=credentials, timeout=10)
+            response.raise_for_status()
+            if 'CAS Login' in response.text or '统一身份认证' in response.text:
+                raise RoomLookupError('统一身份认证失败，请检查学号和密码')
+            portal = session.get(f'{base_url}/chong', timeout=10)
+            portal.raise_for_status()
+            if 'auth.bupt.edu.cn' in portal.url or 'CAS Login' in portal.text:
+                raise RoomLookupError('学校电费系统未完成登录，请检查学号和密码')
+
+            def list_items(action, **params):
+                params['areaid'] = area
+                response = session.post(f'{base_url}/{action}', data=params, timeout=10)
+                response.raise_for_status()
+                payload = response.json()
+                items = payload['d']['data']
+                if payload.get('e', 0) not in (0, '0') or not isinstance(items, list):
+                    raise RoomLookupError('学校暂未返回可用的宿舍列表')
+                return items
+
+            apartments = list_items('part')
+            if apartment is not None:
+                name = apartment.strip().casefold()
+                apartments = [
+                    item for item in apartments
+                    if str(item.get('partmentName', '')).strip().casefold() == name
+                    or str(item.get('partmentId', '')).strip().casefold() == name
+                ]
+                if not apartments:
+                    raise RoomLookupError('西土城校区未找到该公寓，请填写学校电费页面上的公寓名称')
+
+            matches = []
+            for building in apartments:
+                apt_id = building['partmentId']
+                for floor in list_items('floor', partmentId=apt_id):
+                    floor_id = floor['floorId']
+                    for room in list_items('drom', partmentId=apt_id, floorId=floor_id):
+                        number = str(room.get('dromNum', '')).strip().casefold()
+                        label = str(room.get('dromName', '')).strip().casefold()
+                        if apartment is not None:
+                            if target not in (number, label):
+                                continue
+                        elif target not in number + label:
+                            continue
+                        match = {
+                            'AREA_ID': int(area),
+                            'APARTMENT_ID': apt_id,
+                            'FLOOR_ID': str(floor_id),
+                            'ROOM_NUMBER': room['dromNum'],
+                            'EXPECTED_APARTMENT_NAME': building['partmentName'],
+                        }
+                        if apartment is None:
+                            return match
+                        matches.append(match)
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                raise RoomLookupError('找到多个相同房间，请填写电费页面上的完整房间号')
+    except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError):
+        raise RoomLookupError('暂时无法查询学校宿舍信息，请稍后重试') from None
+    raise RoomLookupError('未找到该房间，请核对公寓名称和完整房间号')
+
+
+def _lookup_room():
+    """保留命令行向导的房间搜索入口。"""
+    try:
+        room = find_room(
+            _lookup_room.username, _lookup_room.password, _lookup_room.area or '1', _lookup_room.room_name,
+        )
+    except RoomLookupError as exc:
+        print(f"   ❌ {exc}")
+        return None
+    print(f"   ✅ 找到: {room['EXPECTED_APARTMENT_NAME']}")
+    return room
 
 
 def setup_config():
@@ -97,9 +147,6 @@ def setup_config():
         if choice != 'y':
             print("配置取消")
             return False
-        backup_file = f"{config_file}.backup"
-        shutil.copy2(config_file, backup_file)
-        print(f"已备份现有配置到 {backup_file}")
 
     old = _load_existing_config()
 
@@ -154,8 +201,8 @@ def setup_config():
     if redetect:
         _lookup_room.username = username
         _lookup_room.password = password
-        _lookup_room.area = input("   校区 (1=西土城, 2=沙河) [默认: 1]: ").strip() or \
-            (str(old.get('AREA_ID', 1)) if old.get('AREA_ID') else '1')
+        _lookup_room.area = '1'
+        print("   校区：西土城校区")
         _lookup_room.room_name = input("   房间名 (如: 10-1001): ").strip()
         dorm = _lookup_room()
         if dorm is None:
@@ -198,22 +245,22 @@ def setup_config():
 # 自动生成于 {now}
 
 # 北邮统一身份认证用户名和密码
-BUPT_USERNAME = "{username}"
-BUPT_PASSWORD = "{password}"
+BUPT_USERNAME = {username!r}
+BUPT_PASSWORD = {password!r}
 
 # 宿舍信息（缺少这些字段时程序会查询错误的默认房间！）
 AREA_ID = {dorm['AREA_ID']}
-APARTMENT_ID = "{dorm['APARTMENT_ID']}"
-FLOOR_ID = "{dorm['FLOOR_ID']}"
-ROOM_NUMBER = "{dorm['ROOM_NUMBER']}"
-EXPECTED_APARTMENT_NAME = "{dorm['EXPECTED_APARTMENT_NAME']}"
+APARTMENT_ID = {str(dorm['APARTMENT_ID'])!r}
+FLOOR_ID = {str(dorm['FLOOR_ID'])!r}
+ROOM_NUMBER = {str(dorm['ROOM_NUMBER'])!r}
+EXPECTED_APARTMENT_NAME = {dorm['EXPECTED_APARTMENT_NAME']!r}
 
 # 邮件发送配置
-EMAIL_SMTP_SERVER = "{smtp_server}"
+EMAIL_SMTP_SERVER = {smtp_server!r}
 EMAIL_SMTP_PORT = {smtp_port}
-EMAIL_USERNAME = "{email_user}"
-EMAIL_PASSWORD = "{email_pass}"
-ALERT_EMAILS = ["{alert_email}"]
+EMAIL_USERNAME = {email_user!r}
+EMAIL_PASSWORD = {email_pass!r}
+ALERT_EMAILS = [{alert_email!r}]
 
 # 电量预警阈值（度）：低于此值发邮件，页面显示/横幅/预测预警均用此值
 LOW_BALANCE_THRESHOLD = {low_threshold}
@@ -222,7 +269,7 @@ LOW_BALANCE_THRESHOLD = {low_threshold}
 CHECK_FREQUENCY_MINUTES = {check_frequency}
 
 # Web服务配置
-WEB_HOST = "0.0.0.0"
+WEB_HOST = {loopback_host(old.get('WEB_HOST'))!r}
 WEB_PORT = {web_port}
 DEBUG_MODE = False
 
@@ -235,8 +282,11 @@ PREDICTION_MIN_SAMPLES = 12
 PREDICTION_MIN_OBSERVED_DAYS = 0.5
 """
 
-    with open(config_file, 'w', encoding='utf-8') as f:
-        f.write(config_content)
+    try:
+        write_config(config_file, config_content)
+    except (OSError, SyntaxError, NameError) as e:
+        print(f"❌ 配置保存失败: {e}")
+        return False
 
     print(f"✅ 配置已保存到 {config_file}")
     print()
