@@ -5,6 +5,7 @@ let dailyUsageRange = 7; // 每日用电量柱状图的时间范围（天）
 let chartHistory;
 let chartHistoryLoading = false;
 let chartHistoryFailed = false;
+const chartInspectors = new Map();
 const chartRangeStorageKey = 'electricity-chart-ranges';
 
 // ── 主题（color-scheme meta 方案）─────────────────────────────
@@ -55,6 +56,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // 初始化图表和设置
+    bindChartInteractions();
     restoreChartRanges();
     updateSampleFreshness();
     loadSettings();
@@ -541,6 +543,8 @@ function drawCharts() {
         if (!showChartHistoryStatus('monthlyChart', 'balanceHistoryStatus', all)) {
             const balances = all ? chartHistory.balance_trend_daily : dailyChartData;
             drawChart('monthlyChart', balances, all ? 'all' : 'daily');
+        } else {
+            chartInspectors.get('monthlyChart')?.setPlot(null);
         }
     }
     drawDailyUsageChart();
@@ -585,6 +589,8 @@ function chartPalette() {
 function drawChart(canvasId, chartData, chartType) {
     const canvas = document.getElementById(canvasId);
     if (!canvas) return;
+    const inspector = chartInspectors.get(canvasId);
+    inspector?.setPlot(null);
 
     const ctx = canvas.getContext('2d');
     const width = canvas.offsetWidth;
@@ -599,7 +605,7 @@ function drawChart(canvasId, chartData, chartType) {
     const p = chartPalette();
 
     const points = (chartData || [])
-        .map(item => ({ label: item[0], value: Number(item[1]) }))
+        .map(item => ({ label: String(item[0]), value: Number(item[1]) }))
         .filter(item => Number.isFinite(item.value));
 
     if (points.length === 0) {
@@ -622,48 +628,34 @@ function drawChart(canvasId, chartData, chartType) {
     const balances = points.map(item => item.value);
     const dataMax = Math.max(...balances);
     const dataMin = Math.min(...balances);
-    const rawRange = dataMax - dataMin || Math.max(dataMax * 0.08, 1);
-    const maxBalance = dataMax + rawRange * 0.12;
-    const minBalance = Math.max(0, dataMin - rawRange * 0.12);
-    const balanceRange = maxBalance - minBalance || 1;
+    const padding = (dataMax - dataMin || Math.max(Math.abs(dataMax) * 0.08, 1)) * 0.12;
+    const lower = dataMin < 0 ? dataMin - padding : Math.max(0, dataMin - padding);
+    const upper = dataMax + padding;
+    const tickStep = chartAxisStep(upper - lower);
+    const firstTick = Math.floor(lower / tickStep);
+    const lastTick = Math.ceil(upper / tickStep);
+    const maxBalance = lastTick * tickStep;
+    const balanceRange = (lastTick - firstTick) * tickStep;
     const pointY = value => margin.top + (maxBalance - value) / balanceRange * chartHeight;
 
     // 横轴：优先按真实时间等比分布（无记录的小时/日期不再被压缩），
     // 时间解析失败或只有一个点时退回等间距
-    const timeOf = label => {
-        const s = String(label);
-        return s.includes(' ') ? new Date(s.replace(' ', 'T')).getTime()
-                               : new Date(s + 'T00:00:00').getTime();
-    };
-    const times = points.map(item => timeOf(item.label));
+    const times = points.map(({label}) => Date.parse(label.replace(' ', 'T')));
+    const start = times[0];
+    const end = times.at(-1);
+    const span = end - start;
+    const useTime = span > 0 && times.every(Number.isFinite);
     const stepX = chartWidth / Math.max(points.length - 1, 1);
-    let pointX = index => margin.left + stepX * index;
-    let spanMs = 0;
-    if (points.length >= 2 && times.every(Number.isFinite)) {
-        const tMin = Math.min(...times);
-        const tMax = Math.max(...times);
-        spanMs = tMax - tMin;
-        if (spanMs > 0) {
-            pointX = index => margin.left + (times[index] - tMin) / spanMs * chartWidth;
-        }
-    }
-
-    // 克制的横向网格，减少折线图的视觉噪音。
-    ctx.lineWidth = 1;
-    ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-    for (let i = 0; i <= 4; i++) {
-        const y = margin.top + (chartHeight / 4) * i;
-        ctx.strokeStyle = p.grid;
-        ctx.beginPath();
-        ctx.moveTo(margin.left, y);
-        ctx.lineTo(margin.left + chartWidth, y);
-        ctx.stroke();
-
-        const value = maxBalance - (balanceRange / 4) * i;
-        ctx.fillStyle = p.text;
-        ctx.textAlign = 'right';
-        ctx.fillText(value.toFixed(1), margin.left - 10, y + 4);
-    }
+    const xForTime = time => margin.left + (span > 0 ? (time - start) / span * chartWidth : 0);
+    const positions = times.map((time, index) => useTime ? xForTime(time) : margin.left + stepX * index);
+    const pointX = index => positions[index];
+    const plot = {
+        points, left: margin.left, right: margin.left + chartWidth,
+        top: margin.top, bottom: margin.top + chartHeight, width, height, pointY,
+        centerX: pointX, findIndex: x => nearestChartPoint(positions, x), markPoint: true,
+    };
+    inspector?.setPlot(plot);
+    drawChartGrid(ctx, plot, tickStep, firstTick, lastTick, p);
 
     const buildLinePath = () => {
         ctx.beginPath();
@@ -704,6 +696,11 @@ function drawChart(canvasId, chartData, chartType) {
     ctx.fill();
     ctx.stroke();
 
+    if (chartType === 'all' && Number.isFinite(start) && Number.isFinite(end)) {
+        drawHistoryLabels(ctx, start, end, plot, p, xForTime);
+        return;
+    }
+
     ctx.fillStyle = p.pointHover;
     ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.textAlign = 'right';
@@ -722,7 +719,6 @@ function drawChart(canvasId, chartData, chartType) {
     const LABEL_GAP_X = 6; // 相邻标签之间至少留出的水平间隙
 
     const buildLabel = (index) => {
-        if (chartType === 'all') return { text: points[index].label, full: false };
         if (chartType === 'hourly') {
             const date = new Date(String(points[index].label).replace(' ', 'T'));
             if (!Number.isFinite(date.getTime())) return { text: '', full: false };
@@ -828,10 +824,12 @@ function switchDailyUsageRange(days) {
     drawDailyUsageChart();
 }
 
-// 每日用电量柱状图：纵轴从0起（柱状图如实反映比例），最后一天是今日的累计
+// 每日用电量柱状图从零起，全部记录按自然日定位。
 function drawDailyUsageChart() {
     const canvas = document.getElementById('dailyUsageChart');
     if (!canvas) return;
+    const inspector = chartInspectors.get(canvas.id);
+    inspector?.setPlot(null);
     const all = dailyUsageRange === 'all';
     if (showChartHistoryStatus('dailyUsageChart', 'usageHistoryStatus', all)) return;
 
@@ -870,26 +868,11 @@ function drawDailyUsageChart() {
     const chartWidth = width - margin.left - margin.right;
     const chartHeight = height - margin.top - margin.bottom;
 
-    const maxUsage = Math.max(...points.map(item => item.value));
-    const yMax = Math.max(maxUsage * 1.15, 1);
+    const maxUsage = points.reduce((max, point) => Math.max(max, point.value), 0);
+    const { step, ticks } = usageScale(maxUsage);
+    const yMax = step * ticks;
     const pointY = value => margin.top + (1 - value / yMax) * chartHeight;
-
-    // 横向网格与Y轴刻度，样式与趋势折线图一致
-    ctx.lineWidth = 1;
-    ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-    for (let i = 0; i <= 4; i++) {
-        const y = margin.top + (chartHeight / 4) * i;
-        ctx.strokeStyle = p.grid;
-        ctx.beginPath();
-        ctx.moveTo(margin.left, y);
-        ctx.lineTo(margin.left + chartWidth, y);
-        ctx.stroke();
-
-        const value = (yMax / 4) * (4 - i);
-        ctx.fillStyle = p.text;
-        ctx.textAlign = 'right';
-        ctx.fillText(value.toFixed(1), margin.left - 10, y + 4);
-    }
+    const plotBottom = margin.top + chartHeight;
 
     const n = points.length;
     const firstDay = Date.parse(points[0].label);
@@ -897,11 +880,20 @@ function drawDailyUsageChart() {
     const slot = chartWidth / (days ? days[n - 1] + 1 : n);
     const slotLeft = index => margin.left + slot * (days ? days[index] : index);
     const barWidth = Math.min(slot * 0.62, 46);
+    const pointBySlot = new Map(points.map((_, index) => [days ? days[index] : index, index]));
+    const plot = {
+        points, left: margin.left, right: margin.left + chartWidth,
+        top: margin.top, bottom: plotBottom, width, height, pointY,
+        centerX: index => slotLeft(index) + slot / 2,
+        findIndex: x => pointBySlot.get(Math.floor((x - margin.left) / slot)),
+    };
+    inspector?.setPlot(plot);
+    drawChartGrid(ctx, plot, step, 0, ticks, p);
 
     points.forEach((point, index) => {
         const x = slotLeft(index) + (slot - barWidth) / 2;
         const y = pointY(point.value);
-        const h = margin.top + chartHeight - y;
+        const h = plotBottom - y;
 
         ctx.fillStyle = index === n - 1 ? p.pointHover : p.line;
         ctx.beginPath();
@@ -912,6 +904,12 @@ function drawDailyUsageChart() {
         }
         ctx.fill();
     });
+
+    if (all) {
+        const xForTime = time => margin.left + ((time - firstDay) / 86400000 + 0.5) * slot;
+        drawHistoryLabels(ctx, firstDay, Date.parse(points[n - 1].label), plot, p, xForTime);
+        return;
+    }
 
     // 数值与日期标注密度：用 canvas 实测文字宽度 + 最小间隙来判断能否每天都标，
     // 而不是猜固定像素阈值（高分屏/不同字号下固定值会误判，导致柱宽够却隔天标）
@@ -926,23 +924,20 @@ function drawDailyUsageChart() {
     const valueNeeded = widestValue + LABEL_GAP;
     const valueStep = Math.max(1, Math.ceil(valueNeeded / slot));
 
-    const keepLabel = (index, step) => days
-        ? (days[n - 1] - days[index]) % step === 0
-        : index % step === 0 || index === n - 1;
+    const keepLabel = (index, step) => index % step === 0 || index === n - 1;
     points.forEach((point, index) => {
         if (!keepLabel(index, valueStep)) return;
         const x = slotLeft(index) + slot / 2;
         ctx.fillText(point.value.toFixed(1), x, pointY(point.value) - 6);
     });
 
-    // 全量视图显示年份；同样用实测宽度决定日期标签密度。
+    // 短区间继续显示逐日标签，最后一根对应今天时才标为「今日」。
     ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.fillStyle = p.text;
     const today = new Date().toDateString();
     const dateLabels = points.map((point, index) => {
         const date = new Date(point.label + 'T00:00:00');
-        if (index === n - 1 && (!all || date.toDateString() === today)) return '今日';
-        if (all) return point.label;
+        if (index === n - 1 && date.toDateString() === today) return '今日';
         return Number.isFinite(date.getTime())
             ? (date.getMonth() + 1) + '/' + date.getDate()
             : '';
@@ -958,6 +953,197 @@ function drawDailyUsageChart() {
         const label = dateLabels[index];
         if (label) ctx.fillText(label, x, margin.top + chartHeight + 24);
     });
+}
+
+function chartAxisStep(span) {
+    const target = span / 5;
+    const magnitude = 10 ** Math.floor(Math.log10(target));
+    const normalized = target / magnitude;
+    const step = [1, 2, 2.5, 5, 10].reduce((closest, candidate) =>
+        Math.abs(candidate - normalized) < Math.abs(closest - normalized) ? candidate : closest);
+    return step * magnitude;
+}
+
+function usageScale(maxUsage) {
+    const ceiling = Math.max(maxUsage * 1.05, 1);
+    const step = chartAxisStep(ceiling);
+    return { step, ticks: Math.ceil(ceiling / step) };
+}
+
+function drawChartGrid(ctx, plot, step, firstTick, lastTick, palette) {
+    ctx.lineWidth = 1;
+    ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = palette.text;
+    ctx.strokeStyle = palette.grid;
+    ctx.textAlign = 'right';
+    ctx.fillText('度', plot.left - 10, 13);
+    for (let i = lastTick; i >= firstTick; i--) {
+        const value = step * i;
+        const y = plot.pointY(value);
+        ctx.beginPath();
+        ctx.moveTo(plot.left, y);
+        ctx.lineTo(plot.right, y);
+        ctx.stroke();
+        ctx.fillText(String(Number(value.toFixed(4))), plot.left - 10, y + 4);
+    }
+}
+
+function drawHistoryLabels(ctx, firstDay, lastDay, plot, palette, xForTime) {
+    const dayMs = 86400000;
+    const span = (lastDay - firstDay) / dayMs + 1;
+    const fits = Math.max(1, Math.floor((plot.right - plot.left) / 64));
+    const first = new Date(firstDay);
+    const last = new Date(lastDay);
+    const singleYear = first.getUTCFullYear() === last.getUTCFullYear();
+    const times = [firstDay];
+    const showMonths = span >= 45;
+    if (showMonths) {
+        const months = (last.getUTCFullYear() - first.getUTCFullYear()) * 12
+            + last.getUTCMonth() - first.getUTCMonth();
+        const stride = Math.max(1, Math.ceil((months + 1) / fits));
+        for (let offset = stride; offset <= months; offset += stride) {
+            times.push(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + offset, 1));
+        }
+    } else {
+        const stride = Math.max(1, Math.ceil(span / fits));
+        for (let offset = stride; offset < span; offset += stride) times.push(firstDay + offset * dayMs);
+    }
+
+    ctx.fillStyle = palette.text;
+    ctx.strokeStyle = palette.grid;
+    ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+    if (singleYear) {
+        ctx.textAlign = 'right';
+        ctx.fillText(`${first.getUTCFullYear()}年`, plot.right, 13);
+    }
+    ctx.textAlign = 'center';
+    let previousRight = -Infinity;
+    let previousYear;
+    for (const time of times) {
+        const date = new Date(time);
+        const year = date.getUTCFullYear();
+        const prefix = !singleYear && year !== previousYear ? `${year}年` : '';
+        const day = showMonths ? '' : `${date.getUTCDate()}日`;
+        const text = `${prefix}${date.getUTCMonth() + 1}月${day}`;
+        const halfWidth = ctx.measureText(text).width / 2;
+        const tickX = xForTime(time);
+        const x = Math.max(plot.left + halfWidth, Math.min(tickX, plot.right - halfWidth));
+        if (x - halfWidth < previousRight + 10) continue;
+        ctx.beginPath();
+        ctx.moveTo(tickX, plot.bottom);
+        ctx.lineTo(tickX, plot.bottom + 5);
+        ctx.stroke();
+        ctx.fillText(text, x, plot.bottom + 24);
+        previousRight = x + halfWidth;
+        previousYear = year;
+    }
+}
+
+function nearestChartPoint(positions, x) {
+    let first = 0;
+    let last = positions.length - 1;
+    while (first < last) {
+        const middle = Math.floor((first + last) / 2);
+        if (x <= (positions[middle] + positions[middle + 1]) / 2) last = middle;
+        else first = middle + 1;
+    }
+    return first;
+}
+
+function bindChartInteractions() {
+    for (const canvas of document.querySelectorAll('[data-chart-inspect]')) {
+        chartInspectors.set(canvas.id, bindChartInteraction(canvas));
+    }
+    document.addEventListener('pointerdown', event => {
+        for (const [id, inspector] of chartInspectors) {
+            if (event.target.id !== id) inspector.hideReading();
+        }
+    });
+}
+
+function bindChartInteraction(canvas) {
+    const guide = canvas.parentElement.querySelector('.chart-guide');
+    const reading = canvas.parentElement.querySelector('.chart-reading');
+    const readingDate = reading.querySelector('.chart-reading-date');
+    const readingValue = reading.querySelector('.chart-reading-value');
+    let plot;
+    let selected = null;
+
+    function hideReading() {
+        if (selected === null) return;
+        selected = null;
+        guide.hidden = true;
+        reading.hidden = true;
+    }
+
+    function showReading(index) {
+        if (index === selected) return;
+        selected = index;
+        const point = plot.points[index];
+        const x = plot.centerX(index);
+        const y = plot.pointY(point.value);
+        guide.style.left = `${x}px`;
+        guide.style.top = `${plot.top}px`;
+        guide.style.height = `${plot.bottom - plot.top}px`;
+        guide.toggleAttribute('data-point', Boolean(plot.markPoint));
+        if (plot.markPoint) guide.style.setProperty('--chart-point-y', `${y - plot.top}px`);
+        guide.hidden = false;
+
+        readingDate.textContent = point.label.slice(0, 16);
+        readingValue.textContent = `${point.value.toFixed(2)} 度`;
+        reading.hidden = false;
+        const left = Math.max(8, Math.min(x - reading.offsetWidth / 2, plot.width - reading.offsetWidth - 8));
+        const above = y - reading.offsetHeight - 9;
+        const top = above >= 8 ? above : Math.min(y + 9, plot.height - reading.offsetHeight - 8);
+        reading.style.left = `${left}px`;
+        reading.style.top = `${top}px`;
+    }
+
+    function inspect(event) {
+        if (!plot) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+        if (x < plot.left || x > plot.right || y < plot.top || y > plot.bottom) {
+            hideReading();
+            return;
+        }
+        const index = plot.findIndex(x);
+        if (index === undefined) hideReading();
+        else showReading(index);
+    }
+
+    canvas.addEventListener('pointermove', event => {
+        if (event.pointerType !== 'touch') inspect(event);
+    });
+    canvas.addEventListener('pointerdown', inspect);
+    canvas.addEventListener('pointerleave', event => {
+        if (event.pointerType !== 'touch') hideReading();
+    });
+    canvas.addEventListener('pointercancel', hideReading);
+    canvas.addEventListener('blur', hideReading);
+    canvas.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            hideReading();
+            return;
+        }
+        if (!plot) return;
+        const last = plot.points.length - 1;
+        const index = selected ?? last;
+        const keys = { Home: 0, End: last, ArrowLeft: Math.max(0, index - 1), ArrowRight: Math.min(last, index + 1) };
+        if (!Object.hasOwn(keys, event.key)) return;
+        event.preventDefault();
+        showReading(keys[event.key]);
+    });
+
+    return {
+        hideReading,
+        setPlot(next) {
+            hideReading();
+            plot = next;
+            canvas.tabIndex = plot ? 0 : -1;
+        },
+    };
 }
 
 // 数据新鲜度探针（每60秒）：只拉最新记录时间戳（/api/version 近零开销），

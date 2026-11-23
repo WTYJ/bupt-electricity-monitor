@@ -1,4 +1,12 @@
 <!DOCTYPE html>
+{% macro inspectable_chart(chart_id, label) %}
+    <canvas id="{{ chart_id }}" data-chart-inspect tabindex="0" aria-label="{{ label }}，可用左右方向键查看数据"></canvas>
+    <div class="chart-guide" aria-hidden="true" hidden></div>
+    <div class="chart-reading" role="status" hidden>
+        <span class="chart-reading-date"></span>
+        <strong class="chart-reading-value"></strong>
+    </div>
+{% endmacro %}
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -260,13 +268,13 @@
                 </div>
 
                 <div class="chart-container" id="hourlyChartContainer" hidden>
-                    <canvas id="hourlyChart"></canvas>
+                    {{ inspectable_chart('hourlyChart', '24 小时电量趋势') }}
                 </div>
                 <div class="chart-container" id="dailyChartContainer">
-                    <canvas id="dailyChart"></canvas>
+                    {{ inspectable_chart('dailyChart', '7 天电量趋势') }}
                 </div>
                 <div class="chart-container" id="monthlyChartContainer" hidden>
-                    <canvas id="monthlyChart"></canvas>
+                    {{ inspectable_chart('monthlyChart', '历史电量趋势') }}
                     <p id="balanceHistoryStatus" class="chart-history-status" role="status" hidden></p>
                 </div>
             </section>
@@ -284,7 +292,7 @@
                     </div>
                 </div>
                 <div class="chart-container">
-                    <canvas id="dailyUsageChart"></canvas>
+                    {{ inspectable_chart('dailyUsageChart', '每日用电量') }}
                     <p id="usageHistoryStatus" class="chart-history-status" role="status" hidden></p>
                 </div>
             </section>
