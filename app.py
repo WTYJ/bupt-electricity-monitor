@@ -26,6 +26,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from werkzeug.serving import ThreadedWSGIServer
 from config_io import check_frequency_minutes, initial_config, loopback_host, setup_required
 from instance import InstanceAlreadyRunning, active_dashboard_url, register_instance
+from log_access import rotating_log_handler
 from releases import SoftwareUpdates
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -39,17 +40,8 @@ except ModuleNotFoundError as exc:
     config = initial_config(PROJECT_DIR / 'config.py')
     sys.modules['config'] = config
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        # encoding='utf-8' 必须显式指定：Windows 下 FileHandler 默认按 locale（GBK）写盘，
-        # 日志里出现 emoji/生僻字就会抛 UnicodeEncodeError 或写出混编码行。
-        # /api/logs 侧的 errors='replace' 只是对历史脏数据的容错，不能替代这里的正确编码。
-        logging.FileHandler('electric_monitor.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 
 scheduler = BackgroundScheduler()
 
@@ -106,6 +98,12 @@ def scheduled_check():
         logging.error(f"定时检查出错: {str(e)}")
 
 
+def next_check_time():
+    job = scheduler.get_job('electric_check')
+    next_run = getattr(job, 'next_run_time', None)
+    return next_run.astimezone().isoformat(timespec='seconds') if next_run else None
+
+
 class LocalDashboardServer(ThreadedWSGIServer):
     # Windows SO_REUSEADDR 允许同一地址出现两个监听者，仪表盘需要独占监听端口。
     allow_reuse_address = not hasattr(socket, 'SO_EXCLUSIVEADDRUSE')
@@ -155,7 +153,7 @@ def main(registration=None, open_browser=False):
     set_monitor(ElectricMonitor())
 
     updates = SoftwareUpdates()
-    app = create_app(monitor, reschedule=setup_scheduler, updates=updates)
+    app = create_app(monitor, reschedule=setup_scheduler, updates=updates, next_check=next_check_time)
     app.debug = getattr(config, 'DEBUG_MODE', False)
     configured_host = getattr(config, 'WEB_HOST', None)
     host = loopback_host(configured_host)
@@ -193,7 +191,16 @@ def launch():
 
     try:
         with register_instance(PROJECT_DIR) as registration:
-            main(registration, open_browser=args.open_browser)
+            # 只有持有实例锁的进程可以打开文件，否则 Windows 上轮转时无法重命名旧日志。
+            handler = rotating_log_handler()
+            handler.setFormatter(logging.Formatter(LOG_FORMAT))
+            logger = logging.getLogger()
+            logger.addHandler(handler)
+            try:
+                main(registration, open_browser=args.open_browser)
+            finally:
+                logger.removeHandler(handler)
+                handler.close()
     except InstanceAlreadyRunning:
         logging.info("本项目的电费监控已在运行")
         if args.open_browser:

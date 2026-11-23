@@ -11,7 +11,7 @@
 import json
 import logging
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 
 DB_PATH = 'electric_data.db'
@@ -163,7 +163,7 @@ def recent_records(limit=20):
     with _connect() as conn:
         return conn.execute('''
             SELECT * FROM electric_records
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, id DESC
             LIMIT ?
         ''', (limit,)).fetchall()
 
@@ -200,7 +200,7 @@ def balance_trend(bucket_expr, since_expr=None, drop_early_tail=False):
                 SELECT {bucket_expr} AS label, balance, timestamp,
                        ROW_NUMBER() OVER (
                            PARTITION BY {bucket_expr}
-                           ORDER BY timestamp DESC
+                           ORDER BY timestamp DESC, id DESC
                        ) AS rn
                 FROM electric_records
                 WHERE {where}
@@ -217,6 +217,31 @@ def max_record_timestamp():
             SELECT MAX(timestamp) FROM electric_records WHERE balance IS NOT NULL
         ''').fetchone()
     return row[0] if row and row[0] else None
+
+
+def dashboard_revision():
+    """捕获新增和删除，包括同秒新增和删除较旧记录。"""
+    with _connect() as conn:
+        count, last_id = conn.execute('''
+            SELECT (SELECT COUNT(*) FROM electric_records),
+                   (SELECT COALESCE(MAX(id), 0) FROM electric_records)
+        ''').fetchone()
+    return f'{count}:{last_id}'
+
+
+def export_records():
+    with _connect() as conn:
+        return conn.execute('''
+            SELECT timestamp, balance, status, raw_data
+            FROM electric_records ORDER BY timestamp, id
+        ''').fetchall()
+
+
+def backup_database():
+    """用 SQLite 在线备份取得一致快照，包含历史表和预警。"""
+    with _connect() as source, closing(sqlite3.connect(':memory:')) as target:
+        source.backup(target)
+        return target.serialize()
 
 
 def clear_all_records():

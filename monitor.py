@@ -48,11 +48,14 @@ class ElectricMonitor:
 
     def __init__(self):
         self.session = requests.Session()
+        self.collection_error = None
+        self.last_check = None
 
     def login_bupt(self):
         """登录北邮统一身份认证"""
         try:
             response = self.session.get(LOGIN_URL, timeout=10)
+            response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
 
             # 提取登录页必要的隐藏字段
@@ -61,6 +64,7 @@ class ElectricMonitor:
             _eventId_input = soup.find('input', {'name': '_eventId'})
 
             if not type_input or not execution_input or not _eventId_input:
+                self.collection_error = '学校登录页面格式异常，请稍后重试。'
                 logging.error("无法找到登录所需的隐藏字段，页面结构可能已变化")
                 # 保存页面内容用于调试
                 with open('debug_login_page.html', 'w', encoding='utf-8') as f:
@@ -77,14 +81,29 @@ class ElectricMonitor:
             }
 
             response = self.session.post(LOGIN_URL, data=login_data, timeout=10)
+            response.raise_for_status()
 
             if 'CAS Login' in response.text or '统一身份认证' in response.text:
+                self.collection_error = '学校账号登录失败，请核对统一身份认证配置。'
                 logging.error("登录失败，请检查用户名和密码")
                 return False
 
             logging.info("登录成功")
             return True
 
+        except requests.Timeout:
+            self.collection_error = '学校登录接口超时，请稍后重试。'
+            logging.warning(self.collection_error)
+            return False
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else '未知'
+            self.collection_error = f'学校登录服务返回 HTTP {status}，请稍后重试。'
+            logging.warning(self.collection_error)
+            return False
+        except requests.RequestException:
+            self.collection_error = '无法连接学校登录接口，请检查网络。'
+            logging.warning(self.collection_error)
+            return False
         except Exception as e:
             logging.error(f"登录过程中出现错误: {str(e)}")
             return False
@@ -102,6 +121,7 @@ class ElectricMonitor:
 
     def get_electric_data(self):
         """获取电费数据 - 智能登录检查"""
+        self.collection_error = None
         try:
             # 先尝试直接访问电费查询页面，检查是否需要登录
             response = self.session.get(ELECTRIC_PAGE_URL, timeout=10, allow_redirects=True)
@@ -113,12 +133,14 @@ class ElectricMonitor:
                 logging.info("需要登录，开始登录流程...")
                 if not self.login_bupt():
                     logging.error("登录失败")
+                    self.collection_error = self.collection_error or '学校登录未完成，请查看系统日志。'
                     return None
 
                 # 重新访问电费页面
                 response = self.session.get(ELECTRIC_PAGE_URL, timeout=10)
                 if response.status_code != 200:
                     logging.error(f"登录后访问电费页面失败，状态码: {response.status_code}")
+                    self.collection_error = '学校电费页面暂时不可用，请稍后重试。'
                     return None
                 logging.info("登录成功，重新访问电费页面成功")
             else:
@@ -126,6 +148,7 @@ class ElectricMonitor:
 
             if response.status_code != 200:
                 logging.error(f"访问电费页面失败，状态码: {response.status_code}")
+                self.collection_error = '学校电费页面暂时不可用，请稍后重试。'
                 return None
 
             logging.info("开始查询电费数据...")
@@ -148,6 +171,7 @@ class ElectricMonitor:
 
             if response.status_code != 200:
                 logging.error(f"电费查询接口访问失败，状态码: {response.status_code}")
+                self.collection_error = '学校电费接口暂时不可用，请稍后重试。'
                 return None
 
             # 解析JSON响应
@@ -157,6 +181,7 @@ class ElectricMonitor:
 
                 if electric_data.get('e') != 0:
                     logging.error(f"电费查询失败: {electric_data.get('m', '未知错误')}")
+                    self.collection_error = '学校拒绝了电费查询，请核对宿舍配置或稍后重试。'
                     return None
 
                 # 提取数据
@@ -167,6 +192,7 @@ class ElectricMonitor:
                 returned_name = str(raw_data.get('parName', ''))
                 if expected_name and returned_name != expected_name:
                     logging.error(f"接口返回的公寓名不匹配: 期望[{expected_name}], 实际[{returned_name}]，本次数据不保存")
+                    self.collection_error = '学校返回的公寓与配置不一致，请核对宿舍信息。'
                     return None
 
                 # 学校赠送池（freeEnd）优先扣费：真实可用电量 = 付费余额 + 赠送余量
@@ -205,11 +231,21 @@ class ElectricMonitor:
             except json.JSONDecodeError as e:
                 logging.error(f"电费数据JSON解析失败: {e}")
                 logging.error(f"响应内容: {response.text[:500]}")
+                self.collection_error = '学校返回的电费数据无法读取，请稍后重试。'
                 return None
             except (TypeError, ValueError, KeyError) as e:
                 logging.error(f"电费数据解析错误: {e}")
+                self.collection_error = '学校返回的电费数据不完整，请稍后重试。'
                 return None
 
+        except requests.Timeout:
+            self.collection_error = '学校电费接口超时，请稍后重试。'
+            logging.warning(self.collection_error)
+            return None
+        except requests.RequestException:
+            self.collection_error = '无法连接学校电费接口，请检查网络。'
+            logging.warning(self.collection_error)
+            return None
         except Exception as e:
             logging.error(f"获取电费数据时出现错误: {str(e)}")
             return None
@@ -714,11 +750,19 @@ def run_check(monitor):
     if not _check_lock.acquire(blocking=False):
         raise CheckInProgress
     try:
-        data = monitor.get_electric_data()
-        if not data:
-            return None
-
-        storage.save_record(data)
+        try:
+            data = monitor.get_electric_data()
+            if not data:
+                monitor.last_check = {
+                    'at': datetime.now().isoformat(timespec='seconds'),
+                    'error': getattr(monitor, 'collection_error', None) or '电费采集失败，请查看系统日志。',
+                }
+                return None
+            storage.save_record(data)
+        except Exception:
+            monitor.last_check = {'at': datetime.now().isoformat(timespec='seconds'), 'error': '检查记录未能保存，请查看系统日志。'}
+            raise
+        monitor.last_check = {'at': datetime.now().isoformat(timespec='seconds'), 'error': None}
 
         threshold = float(config.LOW_BALANCE_THRESHOLD)
         balance = float(data['balance'])

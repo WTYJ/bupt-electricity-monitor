@@ -1,0 +1,38 @@
+<section id="dashboard-records" class="panel records-panel" aria-labelledby="recordsHeading">
+    <div class="section-heading">
+        <div>
+            <h2 id="recordsHeading">最近记录</h2>
+        </div>
+    </div>
+
+    <div id="records-list" class="table-wrap" role="region" aria-label="最近检查记录列表" tabindex="0">
+        <table class="records-table">
+            <thead>
+                <tr>
+                    <th scope="col">时间</th>
+                    <th scope="col">剩余电量</th>
+                    <th scope="col">本月用量</th>
+                    <th scope="col">状态</th>
+                    <th scope="col"><span class="sr-only">操作</span></th>
+                </tr>
+            </thead>
+            <tbody id="records-tbody">
+                {% for record in records %}
+                <tr>
+                    <td data-label="时间">{{ record[1] }}</td>
+                    <td data-label="剩余电量" class="amount-cell">{{ "%.2f" | format(record[2] or 0) }} 度</td>
+                    <td data-label="本月用量">{{ "%.2f" | format(record[4] or 0) }} 度</td>
+                    <td data-label="状态"><span class="status-pill">{{ record[5] | status_label }}</span></td>
+                    <td class="row-action">
+                        <button id="delete-record-{{ record[0] }}" class="delete-btn" type="button" onclick="deleteRecord({{ record[0] }}, event)">删除</button>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td class="empty-table" colspan="5">还没有检查记录，点击“立即检查”获取第一条数据。</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>

@@ -3,10 +3,14 @@ let hourlyChartData, dailyChartData, dailyUsageData = [];
 let currentChart = 'daily'; // 当前显示的图表类型
 let dailyUsageRange = 7; // 每日用电量柱状图的时间范围（天）
 let chartHistory;
-let chartHistoryLoading = false;
+let chartHistoryRequest;
 let chartHistoryFailed = false;
 const chartInspectors = new Map();
 const chartRangeStorageKey = 'electricity-chart-ranges';
+let dashboardRevision = document.getElementById('chartData').dataset.revision;
+let dashboardRequest = 0;
+let activeDashboardRequest;
+let dashboardNeedsRefresh = false;
 
 function readBrowserSetting(key) {
     try {
@@ -190,7 +194,7 @@ if (confirmDialog) {
 
 // verificationWord 用于需要输入指定文字的操作。
 function confirmAction(options = {}) {
-    const { title = '确认操作', message = '', confirmText = '确定', verificationWord = '' } = options;
+    const { title = '确认操作', message = '', confirmText = '确定', verificationWord = '', offerBackup = false } = options;
     if (!confirmDialog) {
         return Promise.resolve(!verificationWord && window.confirm(message));
     }
@@ -200,6 +204,7 @@ function confirmAction(options = {}) {
 
     document.getElementById('confirmTitle').textContent = title;
     document.getElementById('confirmMessage').textContent = message;
+    document.getElementById('confirmBackup').hidden = !offerBackup;
     confirmWord = verificationWord;
     if (confirmVerificationInput) {
         confirmVerification.hidden = !verificationWord;
@@ -222,13 +227,12 @@ function checkNow(event) {
 
     fetch('/api/check', { method: 'POST' })
         .then(response => response.json())
-        .then(data => {
+        .then(async data => {
             if (data.success) {
                 showAlert('检查完成！', 'success');
-                setTimeout(() => {
-                    location.reload();
-                }, 1000);
+                await refreshDashboard().catch(() => showAlert('数据已采集，页面刷新失败，将自动重试。', 'warning'));
             } else {
+                if (Object.hasOwn(data, 'last_check')) updateCheckStatus(data);
                 showAlert(data.message || '检查失败', 'error');
             }
         })
@@ -249,14 +253,14 @@ function refreshPrediction(event) {
 
     fetch('/api/prediction')
         .then(response => response.json())
-        .then(data => {
+        .then(async data => {
             const rendered = document.getElementById('last-update').dateTime;
             if (data.sample_time && data.sample_time !== rendered) {
-                location.reload();
-                return;
+                await refreshDashboard();
+            } else {
+                updatePredictionDisplay(data);
+                updateSampleFreshness();
             }
-            updatePredictionDisplay(data);
-            updateSampleFreshness();
             showAlert('预测数据已更新！', 'success');
         })
         .catch(error => {
@@ -266,6 +270,71 @@ function refreshPrediction(event) {
         .finally(() => {
             setButtonLoading(btn, false);
         });
+}
+
+function updateCheckStatus({ next_check, last_check }) {
+    const next = document.getElementById('check-next');
+    const time = document.getElementById('check-next-time');
+    const failure = document.getElementById('check-failure');
+    const shortTime = value => value?.slice(5, 16).replace('T', ' ') || '';
+    next.hidden = !next_check;
+    time.dateTime = next_check || '';
+    time.title = next_check || '';
+    time.textContent = shortTime(next_check);
+    const message = last_check?.error ? shortTime(last_check.at) + ' 采集失败：' + last_check.error : '';
+    if (failure.textContent.trim() !== message) failure.textContent = message;
+    failure.hidden = !message;
+}
+
+async function refreshDashboard(background = false) {
+    if (background && activeDashboardRequest) return;
+    const request = ++dashboardRequest;
+    activeDashboardRequest = request;
+    dashboardNeedsRefresh = true;
+    try {
+        const response = await fetch('/api/dashboard', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Dashboard request failed');
+        const data = await response.json();
+        if (request !== dashboardRequest || (background && document.querySelector('dialog[open]'))) return;
+        applyDashboardSnapshot(data);
+    } finally {
+        if (activeDashboardRequest === request) activeDashboardRequest = null;
+    }
+}
+
+function applyDashboardSnapshot(data) {
+    const fragment = document.createElement('template');
+    fragment.innerHTML = data.overview + data.records;
+    const overview = document.getElementById('dashboard-overview');
+    const records = document.getElementById('dashboard-records');
+    const newOverview = fragment.content.querySelector('#dashboard-overview');
+    const newRecords = fragment.content.querySelector('#dashboard-records');
+    if (!newOverview || !newRecords) throw new Error('Invalid dashboard response');
+    const focused = document.activeElement;
+    const restoreFocus = overview.contains(focused) || records.contains(focused);
+    const { scrollX, scrollY } = window;
+    const listScroll = document.getElementById('records-list').scrollLeft;
+    newOverview.querySelector('#prediction-details').open = document.getElementById('prediction-details').open;
+    newOverview.querySelector('#availableUpdate').replaceWith(availableUpdate);
+    overview.replaceWith(newOverview);
+    records.replaceWith(newRecords);
+    document.getElementById('records-list').scrollLeft = listScroll;
+    if (restoreFocus) {
+        document.getElementById(focused.id)?.focus({ preventScroll: true });
+    }
+
+    dashboardRevision = data.revision;
+    dashboardNeedsRefresh = false;
+    hourlyChartData = data.hourly;
+    dailyChartData = data.daily;
+    dailyUsageData = data.daily_usage;
+    chartHistoryRequest?.abort();
+    chartHistoryRequest = null;
+    chartHistory = null;
+    if (currentChart === 'all' || dailyUsageRange === 'all') loadChartHistory();
+    drawCharts();
+    updateSampleFreshness();
+    window.scrollTo({ left: scrollX, top: scrollY, behavior: 'instant' });
 }
 
 function updateSampleFreshness() {
@@ -337,6 +406,7 @@ async function clearAllRecords(event) {
         message: '全部电费历史和预警记录将被永久删除。',
         confirmText: '清空全部记录',
         verificationWord: '清空',
+        offerBackup: true,
     }))) {
         return;
     }
@@ -346,12 +416,11 @@ async function clearAllRecords(event) {
 
     fetch('/api/records', { method: 'DELETE' })
         .then(response => response.json())
-        .then(data => {
+        .then(async data => {
             if (data.success) {
+                closeSettings();
                 showAlert('记录清空成功！', 'success');
-                setTimeout(() => {
-                    location.reload();
-                }, 1000);
+                await refreshDashboard().catch(() => showAlert('记录已清空，页面将重试刷新。', 'warning'));
             } else {
                 showAlert(data.message || '清空失败', 'error');
             }
@@ -377,11 +446,10 @@ async function deleteRecord(recordId, event) {
 
     fetch(`/api/records/${recordId}`, { method: 'DELETE' })
         .then(response => response.json())
-        .then(data => {
+        .then(async data => {
             if (data.success) {
                 showAlert('记录删除成功！', 'success');
-                // 移除表格行
-                event.target.closest('tr').remove();
+                await refreshDashboard().catch(() => showAlert('记录已删除，页面将重试刷新。', 'warning'));
             } else {
                 showAlert(data.message || '删除失败', 'error');
             }
@@ -405,7 +473,7 @@ const settingsNav = document.getElementById('settingsNav');
 const settingsContent = document.getElementById('settingsContent');
 const settingsPageTitle = document.getElementById('settingsPageTitle');
 let settingsLoad;
-let settingsSaving = false;
+let settingsSaving = null;
 
 settingsModal.addEventListener('close', () => {
     if (settingsModal.open) return;
@@ -435,7 +503,7 @@ function openSettingsPage(trigger) {
     settingsPageTitle.textContent = trigger.textContent.trim();
     settingsContent.scrollTop = 0;
     if (settingsModal.open) settingsPageTitle.focus({ preventScroll: true });
-    if (page instanceof HTMLFormElement) loadSettings(page);
+    if (page instanceof HTMLFormElement && page !== settingsSaving) loadSettings(page);
     if (page.dataset.settingsPage === 'data') refreshLogs(null);
 }
 
@@ -496,7 +564,7 @@ async function submitSettings(event) {
             },
         };
 
-    settingsSaving = true;
+    settingsSaving = form;
     status.hidden = true;
     setButtonLoading(button, true);
     try {
@@ -510,10 +578,17 @@ async function submitSettings(event) {
             status.textContent = data.message || '保存失败。';
         } else {
             if (fields.password) fields.password.value = '';
-            status.textContent = '设置已保存，页面即将刷新。';
             status.classList.remove('text-danger');
             status.hidden = false;
-            setTimeout(() => location.reload(), 1000);
+            if (section === 'monitoring') {
+                status.textContent = '设置已保存。';
+                await refreshDashboard().catch(() => { status.textContent = '设置已保存，仪表盘将重试刷新。'; });
+                settingsSaving = null;
+                setButtonLoading(button, false);
+            } else {
+                status.textContent = '设置已保存，页面即将刷新。';
+                setTimeout(() => location.reload(), 1000);
+            }
             return;
         }
     } catch {
@@ -521,7 +596,7 @@ async function submitSettings(event) {
     }
     status.classList.add('text-danger');
     status.hidden = false;
-    settingsSaving = false;
+    settingsSaving = null;
     setButtonLoading(button, false);
 }
 
@@ -650,22 +725,25 @@ function switchChart(chartType) {
 
 // 两张图共用一次全量查询，切回短区间时仍可继续浏览。
 async function loadChartHistory() {
-    if (chartHistory || chartHistoryLoading) return;
-    chartHistoryLoading = true;
+    if (chartHistory || chartHistoryRequest) return;
+    const request = new AbortController();
+    chartHistoryRequest = request;
     chartHistoryFailed = false;
     try {
-        const response = await fetch('/api/charts/history', { cache: 'no-store' });
+        const response = await fetch('/api/charts/history', { cache: 'no-store', signal: request.signal });
         if (!response.ok) throw new Error('Chart history request failed');
         const data = await response.json();
         if (!Array.isArray(data.balance_trend_daily) || !Array.isArray(data.daily_usage)) {
             throw new Error('Invalid chart history');
         }
-        chartHistory = data;
+        if (chartHistoryRequest === request) chartHistory = data;
     } catch {
-        chartHistoryFailed = true;
+        if (chartHistoryRequest === request) chartHistoryFailed = true;
     } finally {
-        chartHistoryLoading = false;
-        drawCharts();
+        if (chartHistoryRequest === request) {
+            chartHistoryRequest = null;
+            drawCharts();
+        }
     }
 }
 
@@ -1295,21 +1373,24 @@ function bindChartInteraction(canvas) {
     };
 }
 
-// 数据新鲜度探针（每60秒）：只拉最新记录时间戳（/api/version 近零开销），
-// 发现新数据才整页刷新。任何原生对话框打开时都不打断（含确认框）。
-setInterval(() => {
+// 轻量轮询更新采集状态。历史记录变化时才拉取仪表盘快照。
+async function pollDashboard() {
     updateSampleFreshness();
-    if (document.querySelector('dialog[open]')) return;
-    fetch('/api/version')
-        .then(response => response.json())
-        .then(v => {
-            const rendered = document.getElementById('last-update').dateTime;
-            if (v.version && v.version !== rendered) {
-                location.reload();
-            }
-        })
-        .catch(error => console.error('数据探针失败:', error));
-}, 60000); // 1分钟
+    if (activeDashboardRequest || document.querySelector('dialog[open]')) return;
+    const request = dashboardRequest;
+    try {
+        const response = await fetch('/api/dashboard/status', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Dashboard status request failed');
+        const status = await response.json();
+        if (request !== dashboardRequest) return;
+        if (dashboardNeedsRefresh || status.revision !== dashboardRevision) await refreshDashboard(true);
+        else updateCheckStatus(status);
+    } catch (error) {
+        console.error('检查仪表盘更新失败:', error);
+    }
+}
+
+setInterval(pollDashboard, 60000);
 
 // 日志相关函数
 

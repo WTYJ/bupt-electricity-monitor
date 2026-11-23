@@ -491,6 +491,13 @@
         font-weight: 650;
     }
 
+    .overview-check-failure {
+        margin-top: 8px;
+        color: var(--danger);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+    }
+
     .overview-update.btn {
         min-height: 26px;
         padding: 2px 8px;
@@ -1430,6 +1437,14 @@
         margin-top: 16px;
         padding-top: 14px;
         border-top: 1px solid var(--line);
+    }
+
+    .settings-record-actions {
+        justify-content: flex-start;
+    }
+
+    .confirm-form .dialog-actions {
+        flex-wrap: wrap;
     }
 
     @media (max-width: 600px) {

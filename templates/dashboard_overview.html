@@ -1,0 +1,91 @@
+{% set sample_time = stats.latest[1] if stats.latest and stats.latest[1] else '' %}
+{% set is_low = stats.latest and stats.latest[2] is not none and stats.prediction.threshold is not none and stats.latest[2] < stats.prediction.threshold %}
+{% set forecast_days = stats.prediction.days_remaining %}
+<section id="dashboard-overview" class="panel overview" aria-label="电量概览">
+    <div class="overview-toolbar">
+        <div class="overview-status">
+            {% if sample_time %}<span>最近采样</span>{% else %}<span>{{ "待设置宿舍" if setup_needed else "等待首次采样" }}</span>{% endif %}
+            <time id="last-update" datetime="{{ sample_time }}" title="{{ sample_time }}"{% if not sample_time %} hidden{% endif %}>{{ sample_time[5:16] }}</time>
+            <span id="sample-stale" class="overview-warning text-warning" role="status" data-stale-at="{{ stats.prediction.sample_stale_at or '' }}"{% if not stats.prediction.data_stale %} hidden{% endif %}>数据已过期</span>
+            <span id="lowBalanceBanner" class="overview-warning text-danger" role="status" data-low="{{ 'true' if is_low else 'false' }}"{% if not is_low or stats.prediction.data_stale %} hidden{% endif %}>低于 {{ "%.1f" | format(stats.prediction.threshold) }} 度预警线</span>
+            <button id="availableUpdate" class="btn btn-soft overview-update" type="button" onclick="openUpdateDialog()" hidden></button>
+            <span id="check-next"{% if not next_check %} hidden{% endif %}>下次检查 <time id="check-next-time" datetime="{{ next_check or '' }}" title="{{ next_check or '' }}">{{ next_check[5:16] | replace('T', ' ') if next_check else '' }}</time></span>
+        </div>
+        <div class="overview-actions">
+            {% if setup_needed %}
+            <button class="btn btn-primary" type="button" onclick="openSetup()">设置宿舍</button>
+            {% else %}
+            <button id="check-now" class="btn btn-primary" type="button" onclick="checkNow(event)">
+                <span class="spinner" aria-hidden="true"></span>
+                <span class="btn-text">立即检查</span>
+            </button>
+            {% endif %}
+            <a class="btn btn-ghost" href="https://app.bupt.edu.cn/buptdf/wap/default/chong" target="_blank" rel="noopener noreferrer">前往充值 <span aria-hidden="true">↗</span></a>
+        </div>
+    </div>
+
+    <p id="check-failure" class="overview-check-failure" role="status"{% if not last_check or not last_check.error %} hidden{% endif %}>
+        {% if last_check and last_check.error %}{{ last_check.at[5:16] | replace('T', ' ') }} 采集失败：{{ last_check.error }}{% endif %}
+    </p>
+
+    <dl class="overview-metrics">
+        <div class="overview-metric overview-balance">
+            <dt>剩余电量</dt>
+            <dd class="overview-value">
+                <strong id="current-balance"{% if is_low and not stats.prediction.data_stale %} class="text-danger"{% endif %}>{% if stats.latest and stats.latest[2] is not none %}{{ "%.2f" | format(stats.latest[2]) }}{% else %}--{% endif %}</strong>
+                <small>度</small>
+            </dd>
+            <dd class="overview-note">上次采样功率 <span id="current-power">{% if stats.current_power is not none %}{{ "%.2f" | format(stats.current_power) }} kW{% else %}--{% endif %}</span></dd>
+            {% if stats.free_pool and stats.latest and stats.latest[2] is not none and stats.latest[2] > 0 %}
+            {% set free_pct = stats.free_pool / stats.latest[2] * 100 %}
+            <dd class="overview-pools">
+                <div class="balance-meter" role="img" aria-label="赠送池 {{ '%.1f' | format(stats.free_pool) }} 度，占 {{ '%.1f' | format(free_pct) }}%；付费池 {{ '%.1f' | format(stats.latest[2] - stats.free_pool) }} 度">
+                    <span class="meter-free" style="width: {{ '%.1f' | format(free_pct) }}%"></span>
+                </div>
+                <div class="meter-legend">
+                    <span class="legend-item"><span class="legend-dot legend-free" aria-hidden="true"></span>赠送 {{ "%.1f" | format(stats.free_pool) }}</span>
+                    <span class="legend-item"><span class="legend-dot legend-paid" aria-hidden="true"></span>付费 {{ "%.1f" | format(stats.latest[2] - stats.free_pool) }}</span>
+                </div>
+            </dd>
+            {% endif %}
+        </div>
+        <div class="overview-metric">
+            <dt>预计还能用</dt>
+            <dd class="overview-value">
+                <strong id="prediction-days"{% if forecast_days is not none and forecast_days <= 3 %} class="text-danger"{% elif forecast_days is not none and forecast_days <= 7 %} class="text-warning"{% endif %}>{{ "%.1f" | format(forecast_days) if forecast_days is not none else '--' }}</strong>
+                <small id="prediction-unit"{% if forecast_days is none %} hidden{% endif %}>天</small>
+            </dd>
+            <dd id="prediction-date-row" class="overview-note"{% if not stats.prediction.predicted_date %} hidden{% endif %}><span id="prediction-date">{{ stats.prediction.predicted_date or '--' }}</span> 到预警线</dd>
+        </div>
+        <div class="overview-metric">
+            <dt>日均用量</dt>
+            <dd class="overview-value"><strong id="usage-avg-7d">{{ "%.2f" | format(stats.usage_avg_7d or 0) }}</strong><small>度</small></dd>
+            <dd class="overview-note">近 {{ stats.usage_avg_window_days or 7 }} 天</dd>
+        </div>
+        <div class="overview-metric">
+            <dt>本月用量</dt>
+            <dd class="overview-value"><strong id="month-usage">{{ "%.2f" | format(stats.month_usage or 0) }}</strong><small>度</small></dd>
+        </div>
+    </dl>
+
+    <details id="prediction-details" class="overview-details">
+        <summary id="prediction-details-toggle">预测详情</summary>
+        <div class="overview-detail-body">
+            <dl class="overview-detail-grid">
+                <div><dt>预警阈值</dt><dd id="prediction-threshold">{{ "%.1f" | format(stats.prediction.threshold) }}度</dd></div>
+                <div><dt>预测日均</dt><dd id="prediction-rate">{{ "%.2f" | format(stats.prediction.daily_usage_avg or 0) }}度</dd></div>
+                <div><dt>已观测</dt><dd id="prediction-observed">{% if stats.prediction.data_points and stats.prediction.data_points.observed_days %}{{ stats.prediction.data_points.observed_days }}天{% else %}--{% endif %}</dd></div>
+                <div><dt>预测方式</dt><dd id="prediction-method">近{{ stats.prediction.window_days or 3 }}天{% if stats.prediction.prediction_method == 'extended' %}（已放宽）{% endif %} · 可信度{% if stats.prediction.prediction_confidence == 'high' %}高{% elif stats.prediction.prediction_confidence == 'medium' %}中{% else %}低{% endif %}</dd></div>
+                <div><dt>上次充值</dt><dd id="last-recharge">{% if stats.last_recharge %}{{ stats.last_recharge.time[5:10] }} · {{ stats.last_recharge.amount }} 度{% else %}--{% endif %}</dd></div>
+                {% if stats.last_grant %}
+                <div><dt>上次赠送到账</dt><dd>{{ stats.last_grant.time[5:10] }} · {{ stats.last_grant.amount }} 度</dd></div>
+                {% endif %}
+                <div><dt>检查频率</dt><dd id="schedule-label">{{ schedule_label }}</dd></div>
+            </dl>
+            <button id="refresh-prediction" class="btn btn-soft" type="button" onclick="refreshPrediction(event)">
+                <span class="spinner" aria-hidden="true"></span>
+                <span class="btn-text">重新计算</span>
+            </button>
+        </div>
+    </details>
+</section>

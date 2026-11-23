@@ -68,93 +68,8 @@
     </header>
 
     <div class="container">
-        {% set sample_time = stats.latest[1] if stats.latest and stats.latest[1] else '' %}
-        {% set is_low = stats.latest and stats.latest[2] is not none and stats.prediction.threshold is not none and stats.latest[2] < stats.prediction.threshold %}
-        {% set forecast_days = stats.prediction.days_remaining %}
         <main>
-            <section class="panel overview" aria-label="电量概览">
-                <div class="overview-toolbar">
-                    <div class="overview-status">
-                        {% if sample_time %}<span>最近采样</span>{% else %}<span>{{ "待设置宿舍" if setup_needed else "等待首次采样" }}</span>{% endif %}
-                        <time id="last-update" datetime="{{ sample_time }}" title="{{ sample_time }}"{% if not sample_time %} hidden{% endif %}>{{ sample_time[5:16] }}</time>
-                        <span id="sample-stale" class="overview-warning text-warning" role="status" data-stale-at="{{ stats.prediction.sample_stale_at or '' }}"{% if not stats.prediction.data_stale %} hidden{% endif %}>数据已过期</span>
-                        <span id="lowBalanceBanner" class="overview-warning text-danger" role="status" data-low="{{ 'true' if is_low else 'false' }}"{% if not is_low or stats.prediction.data_stale %} hidden{% endif %}>低于 {{ "%.1f" | format(stats.prediction.threshold) }} 度预警线</span>
-                        <button id="availableUpdate" class="btn btn-soft overview-update" type="button" onclick="openUpdateDialog()" hidden></button>
-                    </div>
-                    <div class="overview-actions">
-                        {% if setup_needed %}
-                        <button class="btn btn-primary" type="button" onclick="openSetup()">设置宿舍</button>
-                        {% else %}
-                        <button class="btn btn-primary" type="button" onclick="checkNow(event)">
-                            <span class="spinner" aria-hidden="true"></span>
-                            <span class="btn-text">立即检查</span>
-                        </button>
-                        {% endif %}
-                        <a class="btn btn-ghost" href="https://app.bupt.edu.cn/buptdf/wap/default/chong" target="_blank" rel="noopener noreferrer">前往充值 <span aria-hidden="true">↗</span></a>
-                    </div>
-                </div>
-
-                <dl class="overview-metrics">
-                    <div class="overview-metric overview-balance">
-                        <dt>剩余电量</dt>
-                        <dd class="overview-value">
-                            <strong id="current-balance"{% if is_low and not stats.prediction.data_stale %} class="text-danger"{% endif %}>{% if stats.latest and stats.latest[2] is not none %}{{ "%.2f" | format(stats.latest[2]) }}{% else %}--{% endif %}</strong>
-                            <small>度</small>
-                        </dd>
-                        <dd class="overview-note">上次采样功率 <span id="current-power">{% if stats.current_power is not none %}{{ "%.2f" | format(stats.current_power) }} kW{% else %}--{% endif %}</span></dd>
-                        {% if stats.free_pool and stats.latest and stats.latest[2] is not none and stats.latest[2] > 0 %}
-                        {% set free_pct = stats.free_pool / stats.latest[2] * 100 %}
-                        <dd class="overview-pools">
-                            <div class="balance-meter" role="img" aria-label="赠送池 {{ '%.1f' | format(stats.free_pool) }} 度，占 {{ '%.1f' | format(free_pct) }}%；付费池 {{ '%.1f' | format(stats.latest[2] - stats.free_pool) }} 度">
-                                <span class="meter-free" style="width: {{ '%.1f' | format(free_pct) }}%"></span>
-                            </div>
-                            <div class="meter-legend">
-                                <span class="legend-item"><span class="legend-dot legend-free" aria-hidden="true"></span>赠送 {{ "%.1f" | format(stats.free_pool) }}</span>
-                                <span class="legend-item"><span class="legend-dot legend-paid" aria-hidden="true"></span>付费 {{ "%.1f" | format(stats.latest[2] - stats.free_pool) }}</span>
-                            </div>
-                        </dd>
-                        {% endif %}
-                    </div>
-                    <div class="overview-metric">
-                        <dt>预计还能用</dt>
-                        <dd class="overview-value">
-                            <strong id="prediction-days"{% if forecast_days is not none and forecast_days <= 3 %} class="text-danger"{% elif forecast_days is not none and forecast_days <= 7 %} class="text-warning"{% endif %}>{{ "%.1f" | format(forecast_days) if forecast_days is not none else '--' }}</strong>
-                            <small id="prediction-unit"{% if forecast_days is none %} hidden{% endif %}>天</small>
-                        </dd>
-                        <dd id="prediction-date-row" class="overview-note"{% if not stats.prediction.predicted_date %} hidden{% endif %}><span id="prediction-date">{{ stats.prediction.predicted_date or '--' }}</span> 到预警线</dd>
-                    </div>
-                    <div class="overview-metric">
-                        <dt>日均用量</dt>
-                        <dd class="overview-value"><strong id="usage-avg-7d">{{ "%.2f" | format(stats.usage_avg_7d or 0) }}</strong><small>度</small></dd>
-                        <dd class="overview-note">近 {{ stats.usage_avg_window_days or 7 }} 天</dd>
-                    </div>
-                    <div class="overview-metric">
-                        <dt>本月用量</dt>
-                        <dd class="overview-value"><strong id="month-usage">{{ "%.2f" | format(stats.month_usage or 0) }}</strong><small>度</small></dd>
-                    </div>
-                </dl>
-
-                <details id="prediction-details" class="overview-details">
-                    <summary>预测详情</summary>
-                    <div class="overview-detail-body">
-                        <dl class="overview-detail-grid">
-                            <div><dt>预警阈值</dt><dd id="prediction-threshold">{{ "%.1f" | format(stats.prediction.threshold) }}度</dd></div>
-                            <div><dt>预测日均</dt><dd id="prediction-rate">{{ "%.2f" | format(stats.prediction.daily_usage_avg or 0) }}度</dd></div>
-                            <div><dt>已观测</dt><dd id="prediction-observed">{% if stats.prediction.data_points and stats.prediction.data_points.observed_days %}{{ stats.prediction.data_points.observed_days }}天{% else %}--{% endif %}</dd></div>
-                            <div><dt>预测方式</dt><dd id="prediction-method">近{{ stats.prediction.window_days or 3 }}天{% if stats.prediction.prediction_method == 'extended' %}（已放宽）{% endif %} · 可信度{% if stats.prediction.prediction_confidence == 'high' %}高{% elif stats.prediction.prediction_confidence == 'medium' %}中{% else %}低{% endif %}</dd></div>
-                            <div><dt>上次充值</dt><dd id="last-recharge">{% if stats.last_recharge %}{{ stats.last_recharge.time[5:10] }} · {{ stats.last_recharge.amount }} 度{% else %}--{% endif %}</dd></div>
-                            {% if stats.last_grant %}
-                            <div><dt>上次赠送到账</dt><dd>{{ stats.last_grant.time[5:10] }} · {{ stats.last_grant.amount }} 度</dd></div>
-                            {% endif %}
-                            <div><dt>检查频率</dt><dd id="schedule-label">{{ schedule_label }}</dd></div>
-                        </dl>
-                        <button class="btn btn-soft" type="button" onclick="refreshPrediction(event)">
-                            <span class="spinner" aria-hidden="true"></span>
-                            <span class="btn-text">重新计算</span>
-                        </button>
-                    </div>
-                </details>
-            </section>
+            {% include "dashboard_overview.html" %}
 
             <section class="panel chart-panel" aria-labelledby="trendHeading">
                 <div class="section-heading chart-heading">
@@ -199,44 +114,7 @@
                 </div>
             </section>
 
-            <section class="panel records-panel" aria-labelledby="recordsHeading">
-                <div class="section-heading">
-                    <div>
-                        <h2 id="recordsHeading">最近记录</h2>
-                    </div>
-                </div>
-
-                <div class="table-wrap" role="region" aria-label="最近检查记录列表" tabindex="0">
-                    <table class="records-table">
-                        <thead>
-                            <tr>
-                                <th scope="col">时间</th>
-                                <th scope="col">剩余电量</th>
-                                <th scope="col">本月用量</th>
-                                <th scope="col">状态</th>
-                                <th scope="col"><span class="sr-only">操作</span></th>
-                            </tr>
-                        </thead>
-                        <tbody id="records-tbody">
-                            {% for record in records %}
-                            <tr>
-                                <td data-label="时间">{{ record[1] }}</td>
-                                <td data-label="剩余电量" class="amount-cell">{{ "%.2f" | format(record[2] or 0) }} 度</td>
-                                <td data-label="本月用量">{{ "%.2f" | format(record[4] or 0) }} 度</td>
-                                <td data-label="状态"><span class="status-pill">{{ record[5] | status_label }}</span></td>
-                                <td class="row-action">
-                                    <button class="delete-btn" type="button" onclick="deleteRecord({{ record[0] }}, event)">删除</button>
-                                </td>
-                            </tr>
-                            {% else %}
-                            <tr>
-                                <td class="empty-table" colspan="5">还没有检查记录，点击“立即检查”获取第一条数据。</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </section>
+            {% include "dashboard_records.html" %}
 
         </main>
 
@@ -429,10 +307,14 @@
                             <h4>历史记录</h4>
                             <p class="settings-email-help">清空后将永久删除电量历史和预警记录。</p>
                         </div>
-                        <button class="btn btn-danger-soft" type="button" onclick="clearAllRecords(event)">
-                            <span class="spinner" aria-hidden="true"></span>
-                            <span class="btn-text">清空全部记录</span>
-                        </button>
+                        <div class="settings-row settings-record-actions">
+                            <a class="btn btn-soft" href="{{ url_for('api_export_records') }}">导出 CSV</a>
+                            <a class="btn btn-soft" href="{{ url_for('api_backup_records') }}">下载数据库备份</a>
+                            <button class="btn btn-danger-soft" type="button" onclick="clearAllRecords(event)">
+                                <span class="spinner" aria-hidden="true"></span>
+                                <span class="btn-text">清空全部记录</span>
+                            </button>
+                        </div>
                     </div>
                 </section>
             </div>
@@ -450,6 +332,7 @@
                 <input id="confirmVerificationInput" type="text" autocomplete="off" spellcheck="false">
             </div>
             <div class="dialog-actions">
+                <a id="confirmBackup" class="btn btn-soft" href="{{ url_for('api_backup_records') }}" hidden>下载备份</a>
                 <button type="submit" value="cancel" class="btn btn-ghost" autofocus>取消</button>
                 <button type="submit" value="confirm" class="btn btn-danger">确定</button>
             </div>
@@ -477,6 +360,7 @@
     </dialog>
 
     <div id="chartData"
+         data-revision="{{ revision }}"
          data-hourly='{{ (stats.balance_trend_hourly | tojsonfilter) | safe if (stats.balance_trend_hourly) else "[]" }}'
          data-daily='{{ (stats.balance_trend_daily | tojsonfilter) | safe if (stats.balance_trend_daily) else "[]" }}'
          data-daily-usage='{{ (stats.daily_usage | tojsonfilter) | safe if (stats.daily_usage) else "[]" }}'

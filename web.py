@@ -3,10 +3,11 @@
 """
 Web 层 - 全部 Flask 路由
 
-create_app(monitor, reschedule, updates) 返回配置好的 Flask 应用：
+create_app(monitor, reschedule, updates, next_check) 返回配置好的 Flask 应用：
 - monitor: ElectricMonitor 实例（数据采集/预测/统计）
 - reschedule: 配置保存后重新调度定时任务的回调（由 app.py 提供）
 - updates: 服务启动与网页检查共用的软件更新状态
+- next_check: 获取下一次定时采集时间的回调
 
 约定：
 - 手动检查与定时检查共用 monitor.run_check，不另写检查逻辑。
@@ -16,20 +17,22 @@ create_app(monitor, reschedule, updates) 返回配置好的 Flask 应用：
 """
 
 import bisect
+import csv
+import io
 import json
 import logging
 import math
-import os
 import re
 from datetime import datetime
 from ipaddress import IPv6Address
 from threading import Lock
 
 import config
-from flask import Flask, abort, jsonify, render_template, request
+from flask import Flask, abort, jsonify, render_template, request, send_file
 from werkzeug.sansio.utils import host_is_trusted
 
 from config_io import check_frequency_minutes, loopback_host, setup_required, write_config
+from log_access import clear_logs, recent_logs
 from monitor import CheckInProgress, run_check, failed_prediction
 from setup_config import RoomLookupError, find_room
 
@@ -37,7 +40,7 @@ import releases
 import storage
 
 
-def create_app(monitor, reschedule=None, *, updates=None):
+def create_app(monitor, reschedule=None, *, updates=None, next_check=None):
     app = Flask(__name__)
     config_save_lock = Lock()
     if updates is None:
@@ -65,6 +68,23 @@ def create_app(monitor, reschedule=None, *, updates=None):
     @app.route('/')
     def index():
         """主页"""
+        context = _dashboard_context()
+        return render_template(
+            'index.html',
+            **context,
+            app_version=updates.current_version,
+            auto_check_updates=getattr(config, 'AUTO_CHECK_UPDATES', True),
+            dorm_info=None if context['setup_needed'] else _dorm_info(),
+        )
+
+    def _check_status():
+        return {
+            'last_check': getattr(monitor, 'last_check', None),
+            'next_check': next_check() if next_check else None,
+        }
+
+    def _dashboard_context():
+        revision = storage.dashboard_revision()
         stats = monitor.get_statistics()
         # 按与用量卡片相同的自然日口径分摊，一次切区间，按时间戳查表。
         month_start = datetime.now().strftime('%Y-%m-01 00:00:00')
@@ -77,19 +97,27 @@ def create_app(monitor, reschedule=None, *, updates=None):
                 idx = bisect.bisect_right(curve_ends, record_time) - 1
                 r[4] = curve_cum[idx] if idx >= 0 else 0.0
             records.append(r)
-        setup_needed = setup_required(config)
-        return render_template(
-            'index.html',
-            stats=stats,
-            records=records,
-            app_version=updates.current_version,
-            auto_check_updates=getattr(config, 'AUTO_CHECK_UPDATES', True),
-            setup_needed=setup_needed,
-            dorm_info=None if setup_needed else _dorm_info(),
-            schedule_label=_schedule_label()
-        )
+        return dict(stats=stats, records=records, revision=revision,
+                    setup_needed=setup_required(config), schedule_label=_schedule_label(), **_check_status())
 
     # ── 数据 API ─────────────────────────────────────────────────
+
+    @app.get('/api/dashboard')
+    def api_dashboard():
+        context = _dashboard_context()
+        stats = context['stats']
+        return jsonify(
+            revision=context['revision'],
+            overview=render_template('dashboard_overview.html', **context),
+            records=render_template('dashboard_records.html', **context),
+            hourly=stats['balance_trend_hourly'],
+            daily=stats['balance_trend_daily'],
+            daily_usage=stats['daily_usage'],
+        )
+
+    @app.get('/api/dashboard/status')
+    def api_dashboard_status():
+        return jsonify(revision=storage.dashboard_revision(), **_check_status())
 
     @app.route('/api/stats')
     def api_stats():
@@ -144,6 +172,22 @@ def create_app(monitor, reschedule=None, *, updates=None):
         limit = request.args.get('limit', 20, type=int)
         return jsonify({'records': storage.recent_records(limit)})
 
+    @app.get('/api/records/export.csv')
+    def api_export_records():
+        output = io.StringIO(newline='')
+        writer = csv.writer(output)
+        writer.writerow(['采样时间', '剩余电量（度）', '功率（kW）', '状态'])
+        for timestamp, balance, status, raw in storage.export_records():
+            label = STATUS_LABELS.get(str(status or '').strip().lower(), status)
+            writer.writerow([_csv_value(value) for value in (timestamp, balance, _export_power(raw), label)])
+        return send_file(io.BytesIO(output.getvalue().encode('utf-8-sig')), mimetype='text/csv',
+                         as_attachment=True, download_name=f'electric-records-{datetime.now():%Y%m%d-%H%M%S}.csv')
+
+    @app.get('/api/records/backup')
+    def api_backup_records():
+        return send_file(io.BytesIO(storage.backup_database()), mimetype='application/vnd.sqlite3',
+                         as_attachment=True, download_name=f'electric-data-{datetime.now():%Y%m%d-%H%M%S}.db')
+
     @app.route('/api/check', methods=['POST'])
     def api_check():
         """立即检查电费API（与定时任务共用同一条检查流程）"""
@@ -155,14 +199,16 @@ def create_app(monitor, reschedule=None, *, updates=None):
                 return jsonify({
                     'success': True,
                     'message': '检查完成',
-                    'data': result['data']
+                    'data': result['data'],
+                    **_check_status(),
                 })
-            return jsonify({'success': False, 'message': '获取数据失败'})
+            status = _check_status()
+            return jsonify(success=False, message=(status['last_check'] or {}).get('error') or '获取数据失败', **status)
         except CheckInProgress:
             return jsonify({'success': False, 'message': '已有检查正在进行，请稍后重试'}), 409
         except Exception as e:
             logging.error(f"API检查失败: {str(e)}")
-            return jsonify({'success': False, 'message': f'检查失败: {str(e)}'})
+            return jsonify(success=False, message='检查失败，请查看系统日志。', **_check_status())
 
     @app.route('/api/records', methods=['DELETE'])
     def api_clear_records():
@@ -354,68 +400,26 @@ PREDICTION_MIN_OBSERVED_DAYS = {values.get('PREDICTION_MIN_OBSERVED_DAYS', 0.5)}
 
     # ── 日志 API ─────────────────────────────────────────────────
 
-    @app.route('/api/logs', methods=['GET'])
+    @app.get('/api/logs')
     def api_get_logs():
-        """获取系统日志API"""
+        """从当前日志及轮转文件倒序读取指定条数。"""
+        limit = max(1, min(500, request.args.get('limit', 50, type=int)))
+        level = request.args.get('level', 'all')
         try:
-            limit = request.args.get('limit', 50, type=int)
-            level = request.args.get('level', 'all')
+            return jsonify(success=True, logs=recent_logs(limit, level))
+        except OSError:
+            logging.exception('获取日志失败')
+            return jsonify(success=False, message='无法读取本机日志。')
 
-            log_file_path = 'electric_monitor.log'
-            logs = []
-
-            if os.path.exists(log_file_path):
-                # 日志文件可能混入历史遗留的非 UTF-8 行（如 GBK 控制台写入），
-                # 严格解码会让整个日志面板崩溃，用 errors='replace' 容错
-                with open(log_file_path, 'r', encoding='utf-8', errors='replace') as f:
-                    lines = f.readlines()
-
-                # 倒序读取，最新的在前
-                for line in reversed(lines):
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    # 解析日志格式: 2025-06-01 13:51:03,514 - INFO - 消息内容
-                    match = re.match(LOG_PATTERN, line)
-                    if not match:
-                        continue
-
-                    timestamp, log_level, message = match.groups()
-
-                    # 根据级别过滤
-                    if level != 'all' and log_level != level:
-                        continue
-
-                    logs.append({
-                        'timestamp': timestamp,
-                        'level': log_level,
-                        'message': message
-                    })
-
-                    if len(logs) >= limit:
-                        break
-
-            return jsonify({'success': True, 'logs': logs})
-
-        except Exception as e:
-            logging.error(f"获取日志失败: {str(e)}")
-            return jsonify({'success': False, 'message': f'获取日志失败: {str(e)}'})
-
-    @app.route('/api/logs', methods=['DELETE'])
+    @app.delete('/api/logs')
     def api_clear_logs():
-        """清空系统日志API"""
         try:
-            log_file_path = 'electric_monitor.log'
-            if os.path.exists(log_file_path):
-                with open(log_file_path, 'w', encoding='utf-8') as f:
-                    f.write('')
-
-            logging.info("系统日志已被用户清空")
-            return jsonify({'success': True, 'message': '日志已清空'})
-        except Exception as e:
-            logging.error(f"清空日志失败: {str(e)}")
-            return jsonify({'success': False, 'message': f'清空日志失败: {str(e)}'})
+            clear_logs()
+            logging.info('系统日志已被用户清空')
+            return jsonify(success=True, message='日志已清空')
+        except OSError:
+            logging.exception('清空日志失败')
+            return jsonify(success=False, message='无法清空本机日志。')
 
     # ── 内部辅助 ─────────────────────────────────────────────────
 
@@ -431,7 +435,20 @@ PREDICTION_MIN_OBSERVED_DAYS = {values.get('PREDICTION_MIN_OBSERVED_DAYS', 0.5)}
 EMAIL_PATTERN = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
 SMTP_HOST_LABEL = r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
 SMTP_HOST_PATTERN = rf'(?:{SMTP_HOST_LABEL}\.)*{SMTP_HOST_LABEL}\.?'
-LOG_PATTERN = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - (\w+) - (.+)'
+
+
+def _csv_value(value):
+    if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')):
+        return "'" + value
+    return value
+
+
+def _export_power(raw):
+    try:
+        power = float(json.loads(raw)['d']['data']['pTotal'])
+        return power if math.isfinite(power) else None
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return None
 
 
 def _dorm_info():
