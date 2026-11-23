@@ -2,6 +2,9 @@
 config.py
 config.py.backup
 
+# 本地开发说明
+[Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd]
+
 # Python
 *.pyc
 __pycache__/
@@ -10,6 +13,7 @@ venv/
 
 # 运行产物
 *.log
+electric_monitor.log.[0-9]*
 *.db
 electric_monitor.pid
 electric_monitor.lock
