@@ -7,6 +7,15 @@
         <strong class="chart-reading-value"></strong>
     </div>
 {% endmacro %}
+{% macro settings_save() %}
+    <p class="update-status" data-settings-status role="status" hidden></p>
+    <div class="dialog-actions settings-save">
+        <button type="submit" class="btn btn-primary" disabled>
+            <span class="spinner" aria-hidden="true"></span>
+            <span class="btn-text">保存设置</span>
+        </button>
+    </div>
+{% endmacro %}
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -39,14 +48,13 @@
                 <span class="brand-mark" aria-hidden="true">⚡</span>
                 <div class="brand-copy">
                     <h1>宿舍电费监控</h1>
-                    <p class="brand-sub">北邮统一身份认证 · 自动查询与邮件预警</p>
                 </div>
             </div>
             <div class="topbar-actions">
-                <span class="schedule-badge">
-                    <span class="status-dot{% if setup_needed %} status-dot-pending{% endif %}" aria-hidden="true"></span>
-                    <span id="schedule-label">{{ schedule_label }}</span>
-                </span>
+                <button id="settings-toggle" class="btn btn-soft settings-toggle" type="button" aria-haspopup="dialog" aria-controls="settingsModal" onclick="openSettings()">
+                    <span class="settings-icon" aria-hidden="true">⚙︎</span>
+                    设置
+                </button>
                 <!-- 两个状态都写进标记，显示哪个交给 CSS（data-scheme 由 JS 同步）；
                      display:none 的那份同时从无障碍树移除，无需 JS 维护 aria-label -->
                 <button id="theme-toggle" class="theme-toggle" type="button">
@@ -60,199 +68,93 @@
     </header>
 
     <div class="container">
-        {# 全系统唯一阈值 LOW_BALANCE_THRESHOLD；is_low 供横幅与主卡数字着色共用 #}
+        {% set sample_time = stats.latest[1] if stats.latest and stats.latest[1] else '' %}
         {% set is_low = stats.latest and stats.latest[2] is not none and stats.prediction.threshold is not none and stats.latest[2] < stats.prediction.threshold %}
-        {% if is_low %}
-        <div class="alert-banner" id="lowBalanceBanner" data-low="true"{% if stats.prediction.data_stale %} hidden{% endif %}>
-            <span class="banner-icon" aria-hidden="true">⚠️</span>
-            剩余电量 {{ "%.1f" | format(stats.latest[2]) }} 度，已低于预警阈值 {{ stats.prediction.threshold }} 度，请及时充值！
-        </div>
-        {% else %}
-        <div class="alert-banner" id="lowBalanceBanner" hidden>
-            <span class="banner-icon" aria-hidden="true">⚠️</span>
-            剩余电量不足，请及时充值！
-        </div>
-        {% endif %}
-
+        {% set forecast_days = stats.prediction.days_remaining %}
         <main>
-            <section class="balance-hero" aria-label="当前剩余电量">
-                <div class="balance-main">
-                    <p class="balance-label">剩余电量</p>
-                    <p class="balance-value">
-                        <strong id="current-balance" class="{% if is_low and not stats.prediction.data_stale %}text-danger{% endif %}">{% if stats.latest and stats.latest[2] is not none %}{{ "%.2f" | format(stats.latest[2]) }}{% else %}--{% endif %}</strong>
-                        <small>度</small>
-                    </p>
-                    <p class="balance-note">
-                        {% if stats.free_pool %}含学校赠送 {{ "%.1f" | format(stats.free_pool) }} 度{% if stats.last_grant %}（{{ stats.last_grant.time[5:10] }} 到账）{% endif %}{% elif setup_needed %}设置宿舍后开始查询{% else %}低于设定阈值时提醒{% endif %}
-                    </p>
-                    <p id="sample-stale" class="balance-note" role="status" data-stale-at="{{ stats.prediction.sample_stale_at or '' }}"{% if not stats.prediction.data_stale %} hidden{% endif %}>
-                        <strong class="text-warning">数据已过期</strong>，余额和预测基于上次成功采样。
-                    </p>
-                </div>
-                {% if stats.free_pool and stats.latest and stats.latest[2] is not none and stats.latest[2] > 0 %}
-                {# 双池结构一图看清：balance = surplus(付费) + freeEnd(赠送) #}
-                {% set free_pct = stats.free_pool / stats.latest[2] * 100 %}
-                <div class="balance-side">
-                    <div class="balance-meter" role="img"
-                         aria-label="赠送池 {{ '%.1f' | format(stats.free_pool) }} 度，占 {{ '%.1f' | format(free_pct) }}%；付费池 {{ '%.1f' | format(stats.latest[2] - stats.free_pool) }} 度">
-                        <span class="meter-free" style="width: {{ '%.1f' | format(free_pct) }}%"></span>
+            <section class="panel overview" aria-label="电量概览">
+                <div class="overview-toolbar">
+                    <div class="overview-status">
+                        {% if sample_time %}<span>最近采样</span>{% else %}<span>{{ "待设置宿舍" if setup_needed else "等待首次采样" }}</span>{% endif %}
+                        <time id="last-update" datetime="{{ sample_time }}" title="{{ sample_time }}"{% if not sample_time %} hidden{% endif %}>{{ sample_time[5:16] }}</time>
+                        <span id="sample-stale" class="overview-warning text-warning" role="status" data-stale-at="{{ stats.prediction.sample_stale_at or '' }}"{% if not stats.prediction.data_stale %} hidden{% endif %}>数据已过期</span>
+                        <span id="lowBalanceBanner" class="overview-warning text-danger" role="status" data-low="{{ 'true' if is_low else 'false' }}"{% if not is_low or stats.prediction.data_stale %} hidden{% endif %}>低于 {{ "%.1f" | format(stats.prediction.threshold) }} 度预警线</span>
+                        <button id="availableUpdate" class="btn btn-soft overview-update" type="button" onclick="openUpdateDialog()" hidden></button>
                     </div>
-                    <p class="meter-legend">
-                        <span class="legend-item"><span class="legend-dot legend-free" aria-hidden="true"></span>赠送 {{ "%.1f" | format(stats.free_pool) }} 度</span>
-                        <span class="legend-item"><span class="legend-dot legend-paid" aria-hidden="true"></span>付费 {{ "%.1f" | format(stats.latest[2] - stats.free_pool) }} 度</span>
-                    </p>
+                    <div class="overview-actions">
+                        {% if setup_needed %}
+                        <button class="btn btn-primary" type="button" onclick="openSetup()">设置宿舍</button>
+                        {% else %}
+                        <button class="btn btn-primary" type="button" onclick="checkNow(event)">
+                            <span class="spinner" aria-hidden="true"></span>
+                            <span class="btn-text">立即检查</span>
+                        </button>
+                        {% endif %}
+                        <a class="btn btn-ghost" href="https://app.bupt.edu.cn/buptdf/wap/default/chong" target="_blank" rel="noopener noreferrer">前往充值 <span aria-hidden="true">↗</span></a>
+                    </div>
                 </div>
-                {% endif %}
-            </section>
 
-            <section class="metrics-grid" aria-label="用量概览">
-                <article class="metric-card">
-                    <h2 class="metric-label">日均用量</h2>
-                    <p class="metric-value">
-                        <strong id="usage-avg-7d">{{ "%.2f" | format(stats.usage_avg_7d or 0) }}</strong>
-                        <small>度</small>
-                    </p>
-                    <p class="metric-note">按近{{ stats.usage_avg_window_days or 7 }}天实际观测折算{% if stats.observed_days_7d %}，已观测约{{ stats.observed_days_7d }}天{% endif %}</p>
-                </article>
+                <dl class="overview-metrics">
+                    <div class="overview-metric overview-balance">
+                        <dt>剩余电量</dt>
+                        <dd class="overview-value">
+                            <strong id="current-balance"{% if is_low and not stats.prediction.data_stale %} class="text-danger"{% endif %}>{% if stats.latest and stats.latest[2] is not none %}{{ "%.2f" | format(stats.latest[2]) }}{% else %}--{% endif %}</strong>
+                            <small>度</small>
+                        </dd>
+                        <dd class="overview-note">上次采样功率 <span id="current-power">{% if stats.current_power is not none %}{{ "%.2f" | format(stats.current_power) }} kW{% else %}--{% endif %}</span></dd>
+                        {% if stats.free_pool and stats.latest and stats.latest[2] is not none and stats.latest[2] > 0 %}
+                        {% set free_pct = stats.free_pool / stats.latest[2] * 100 %}
+                        <dd class="overview-pools">
+                            <div class="balance-meter" role="img" aria-label="赠送池 {{ '%.1f' | format(stats.free_pool) }} 度，占 {{ '%.1f' | format(free_pct) }}%；付费池 {{ '%.1f' | format(stats.latest[2] - stats.free_pool) }} 度">
+                                <span class="meter-free" style="width: {{ '%.1f' | format(free_pct) }}%"></span>
+                            </div>
+                            <div class="meter-legend">
+                                <span class="legend-item"><span class="legend-dot legend-free" aria-hidden="true"></span>赠送 {{ "%.1f" | format(stats.free_pool) }}</span>
+                                <span class="legend-item"><span class="legend-dot legend-paid" aria-hidden="true"></span>付费 {{ "%.1f" | format(stats.latest[2] - stats.free_pool) }}</span>
+                            </div>
+                        </dd>
+                        {% endif %}
+                    </div>
+                    <div class="overview-metric">
+                        <dt>预计还能用</dt>
+                        <dd class="overview-value">
+                            <strong id="prediction-days"{% if forecast_days is not none and forecast_days <= 3 %} class="text-danger"{% elif forecast_days is not none and forecast_days <= 7 %} class="text-warning"{% endif %}>{{ "%.1f" | format(forecast_days) if forecast_days is not none else '--' }}</strong>
+                            <small id="prediction-unit"{% if forecast_days is none %} hidden{% endif %}>天</small>
+                        </dd>
+                        <dd id="prediction-date-row" class="overview-note"{% if not stats.prediction.predicted_date %} hidden{% endif %}><span id="prediction-date">{{ stats.prediction.predicted_date or '--' }}</span> 到预警线</dd>
+                    </div>
+                    <div class="overview-metric">
+                        <dt>日均用量</dt>
+                        <dd class="overview-value"><strong id="usage-avg-7d">{{ "%.2f" | format(stats.usage_avg_7d or 0) }}</strong><small>度</small></dd>
+                        <dd class="overview-note">近 {{ stats.usage_avg_window_days or 7 }} 天</dd>
+                    </div>
+                    <div class="overview-metric">
+                        <dt>本月用量</dt>
+                        <dd class="overview-value"><strong id="month-usage">{{ "%.2f" | format(stats.month_usage or 0) }}</strong><small>度</small></dd>
+                    </div>
+                </dl>
 
-                <article class="metric-card">
-                    <h2 class="metric-label">本月用量</h2>
-                    <p class="metric-value">
-                        <strong id="month-usage">{{ "%.2f" | format(stats.month_usage or 0) }}</strong>
-                        <small>度</small>
-                    </p>
-                    <p class="metric-note">持续积累本月用电记录</p>
-                </article>
-
-                <article class="metric-card">
-                    <h2 class="metric-label">实时功率</h2>
-                    <p class="metric-value">
-                        <strong id="current-power">{% if stats.current_power is not none %}{{ "%.2f" | format(stats.current_power) }}{% else %}--{% endif %}</strong>
-                        <small>kW</small>
-                    </p>
-                    <p class="metric-note">电表有功功率，每次检查后刷新</p>
-                </article>
-            </section>
-
-            <div class="dashboard-grid">
-                <section class="panel" aria-labelledby="predictionHeading">
-                    <div class="section-heading">
-                        <div>
-                            <h2 id="predictionHeading">电量预测</h2>
-                            <p class="section-sub">基于近期实际消耗的滚动估算</p>
-                        </div>
+                <details id="prediction-details" class="overview-details">
+                    <summary>预测详情</summary>
+                    <div class="overview-detail-body">
+                        <dl class="overview-detail-grid">
+                            <div><dt>预警阈值</dt><dd id="prediction-threshold">{{ "%.1f" | format(stats.prediction.threshold) }}度</dd></div>
+                            <div><dt>预测日均</dt><dd id="prediction-rate">{{ "%.2f" | format(stats.prediction.daily_usage_avg or 0) }}度</dd></div>
+                            <div><dt>已观测</dt><dd id="prediction-observed">{% if stats.prediction.data_points and stats.prediction.data_points.observed_days %}{{ stats.prediction.data_points.observed_days }}天{% else %}--{% endif %}</dd></div>
+                            <div><dt>预测方式</dt><dd id="prediction-method">近{{ stats.prediction.window_days or 3 }}天{% if stats.prediction.prediction_method == 'extended' %}（已放宽）{% endif %} · 可信度{% if stats.prediction.prediction_confidence == 'high' %}高{% elif stats.prediction.prediction_confidence == 'medium' %}中{% else %}低{% endif %}</dd></div>
+                            <div><dt>上次充值</dt><dd id="last-recharge">{% if stats.last_recharge %}{{ stats.last_recharge.time[5:10] }} · {{ stats.last_recharge.amount }} 度{% else %}--{% endif %}</dd></div>
+                            {% if stats.last_grant %}
+                            <div><dt>上次赠送到账</dt><dd>{{ stats.last_grant.time[5:10] }} · {{ stats.last_grant.amount }} 度</dd></div>
+                            {% endif %}
+                            <div><dt>检查频率</dt><dd id="schedule-label">{{ schedule_label }}</dd></div>
+                        </dl>
                         <button class="btn btn-soft" type="button" onclick="refreshPrediction(event)">
                             <span class="spinner" aria-hidden="true"></span>
                             <span class="btn-text">重新计算</span>
                         </button>
                     </div>
-
-                    <div class="forecast-summary">
-                        <div class="forecast-primary">
-                            <span class="forecast-label">预计还能使用</span>
-                            <strong id="prediction-days" class="forecast-days {% if stats.prediction.days_remaining is not none and stats.prediction.days_remaining <= 3 %}text-danger{% elif stats.prediction.days_remaining is not none and stats.prediction.days_remaining <= 7 %}text-warning{% endif %}">
-                                {% if stats.prediction.days_remaining is not none %}{{ "%.1f" | format(stats.prediction.days_remaining) }}天{% else %}--{% endif %}
-                            </strong>
-                        </div>
-                        <div class="forecast-date">
-                            <span>预计到达预警线</span>
-                            <strong id="prediction-date">{{ stats.prediction.predicted_date or '--' }}</strong>
-                        </div>
-                    </div>
-
-                    <div class="prediction-metrics">
-                        <div class="prediction-item">
-                            <span class="prediction-label">预警阈值</span>
-                            <strong id="prediction-threshold">{{ "%.1f" | format(stats.prediction.threshold) }}度</strong>
-                        </div>
-                        <div class="prediction-item">
-                            <span class="prediction-label">估计日均</span>
-                            <strong id="prediction-rate">{{ "%.2f" | format(stats.prediction.daily_usage_avg or 0) }}度</strong>
-                        </div>
-                        <div class="prediction-item">
-                            <span class="prediction-label">已观测</span>
-                            <strong id="prediction-observed">{% if stats.prediction.data_points and stats.prediction.data_points.observed_days %}{{ stats.prediction.data_points.observed_days }}天{% else %}--{% endif %}</strong>
-                        </div>
-                        <div class="prediction-item">
-                            <span class="prediction-label">最近更新</span>
-                            <strong id="last-update">{% if stats.latest and stats.latest[1] %}{{ stats.latest[1] }}{% else %}--{% endif %}</strong>
-                        </div>
-                        <div class="prediction-item">
-                            <span class="prediction-label">上次充值</span>
-                            <strong id="last-recharge">{% if stats.last_recharge %}{{ stats.last_recharge.time[5:10] }} 充{{ stats.last_recharge.amount }}度{% else %}--{% endif %}</strong>
-                        </div>
-                        <div class="prediction-item">
-                            <span class="prediction-label">预测方式</span>
-                            <strong id="prediction-method">
-                                近{{ stats.prediction.window_days or 3 }}天{% if stats.prediction.prediction_method == 'extended' %}（已放宽）{% endif %} · 可信度{% if stats.prediction.prediction_confidence == 'high' %}高{% elif stats.prediction.prediction_confidence == 'medium' %}中{% else %}低{% endif %}
-                            </strong>
-                        </div>
-                    </div>
-                </section>
-
-                <aside class="panel actions-panel" aria-labelledby="actionsHeading">
-                    <div class="section-heading compact">
-                        <div>
-                            <h2 id="actionsHeading">常用操作</h2>
-                        </div>
-                    </div>
-
-                    <div class="action-list">
-                        {% if setup_needed %}
-                        <button class="action-item action-primary" type="button" onclick="openSetup()">
-                            <span class="action-symbol" aria-hidden="true">⚙</span>
-                            <span class="action-copy">
-                                <strong>设置宿舍</strong>
-                                <small>填写统一认证账号和宿舍信息</small>
-                            </span>
-                        </button>
-                        {% else %}
-                        <button class="action-item action-primary" type="button" onclick="checkNow(event)">
-                            <span class="action-symbol" aria-hidden="true">↻</span>
-                            <span class="action-copy">
-                                <strong class="btn-text">立即检查</strong>
-                                <small>从北邮系统同步最新电量</small>
-                            </span>
-                            <span class="spinner" aria-hidden="true"></span>
-                        </button>
-
-                        <button class="action-item" type="button" onclick="openSettings()">
-                            <span class="action-symbol" aria-hidden="true">⚙</span>
-                            <span class="action-copy">
-                                <strong class="btn-text">提醒设置</strong>
-                                <small>调整阈值、邮箱和频率</small>
-                            </span>
-                        </button>
-                        {% endif %}
-                        <a class="action-item" href="https://app.bupt.edu.cn/buptdf/wap/default/chong" target="_blank" rel="noopener noreferrer">
-                            <span class="action-symbol" aria-hidden="true">↗</span>
-                            <span class="action-copy">
-                                <strong>前往充值</strong>
-                                <small>打开北邮电费充值页面</small>
-                            </span>
-                        </a>
-                        <button class="action-item" type="button" onclick="toggleLogs(event)">
-                            <span class="action-symbol" aria-hidden="true">☰</span>
-                            <span class="action-copy">
-                                <strong class="btn-text">查看日志</strong>
-                                <small>检查自动任务运行情况</small>
-                            </span>
-                        </button>
-                        <button class="action-item action-update" type="button" onclick="openUpdateDialog()">
-                            <span class="action-symbol" aria-hidden="true">↑</span>
-                            <span class="action-copy">
-                                <strong>检查更新</strong>
-                                <small>当前版本 {{ app_version or '未知' }}</small>
-                            </span>
-                        </button>
-                    </div>
-
-                    <button class="danger-link" type="button" onclick="clearAllRecords(event)">
-                        <span class="spinner" aria-hidden="true"></span>
-                        <span class="btn-text">清空全部历史记录</span>
-                    </button>
-                </aside>
-            </div>
+                </details>
+            </section>
 
             <section class="panel chart-panel" aria-labelledby="trendHeading">
                 <div class="section-heading chart-heading">
@@ -302,7 +204,6 @@
                     <div>
                         <h2 id="recordsHeading">最近记录</h2>
                     </div>
-                    <span class="record-count">最近 {{ records | length }} 条</span>
                 </div>
 
                 <div class="table-wrap" role="region" aria-label="最近检查记录列表" tabindex="0">
@@ -337,36 +238,6 @@
                 </div>
             </section>
 
-            <section class="panel logs-panel" id="logsCard" hidden aria-labelledby="logsHeading">
-                <div class="section-heading">
-                    <div>
-                        <h2 id="logsHeading">系统日志</h2>
-                        <p class="section-sub">用于排查自动检查、登录或邮件发送问题。</p>
-                    </div>
-                </div>
-                <div class="log-controls">
-                    <button class="btn btn-soft" type="button" onclick="refreshLogs(event)">
-                        <span class="spinner" aria-hidden="true"></span>
-                        <span class="btn-text">刷新日志</span>
-                    </button>
-                    <select id="logLevel" onchange="filterLogs()" aria-label="日志级别">
-                        <option value="all">所有级别</option>
-                        <option value="INFO">信息</option>
-                        <option value="WARNING">警告</option>
-                        <option value="ERROR">错误</option>
-                    </select>
-                    <input type="number" id="logLimit" value="50" min="10" max="500" step="1" onchange="refreshLogs(event)" aria-label="显示日志条数">
-                    <button class="btn btn-danger-soft" type="button" onclick="clearLogs(event)">
-                        <span class="spinner" aria-hidden="true"></span>
-                        <span class="btn-text">清空日志</span>
-                    </button>
-                </div>
-                <div class="log-container">
-                    <div id="log-content" class="log-content">
-                        <div class="log-loading">正在加载日志...</div>
-                    </div>
-                </div>
-            </section>
         </main>
 
     </div>
@@ -411,45 +282,161 @@
     </dialog>
     {% endif %}
 
-    <dialog id="settingsModal" class="dialog" closedby="any" aria-labelledby="settingsTitle">
+    <dialog id="settingsModal" class="dialog settings-dialog" closedby="any" aria-labelledby="settingsTitle">
         <div class="dialog-header">
-            <div>
-                <h2 id="settingsTitle">提醒设置</h2>
-                <p class="section-sub">调整预警阈值、接收邮箱和检查频率。</p>
-            </div>
+            <h2 id="settingsTitle">设置</h2>
             <button class="dialog-close" type="button" onclick="closeSettings()" aria-label="关闭设置">×</button>
         </div>
-        <!-- novalidate：阈值允许手动输入小数，步进按钮由 step=1 控制，避免浏览器原生校验拦截保存 -->
-        <form id="settingsForm" novalidate>
-            <div class="form-group">
-                <label for="threshold">电量阈值</label>
-                <div class="input-with-unit">
-                    <input type="number" id="threshold" name="threshold" step="1" min="0" value="10.00" autofocus>
-                    <span>度</span>
-                </div>
-                <small id="threshold-help">剩余电量低于此数值时发送提醒邮件。</small>
-            </div>
-            <div class="form-group">
-                <label for="emails">提醒邮箱</label>
-                <textarea id="emails" name="emails" placeholder="每行输入一个邮箱地址" aria-describedby="emails-help"></textarea>
-                <small id="emails-help">每行填写一个邮箱。留空则关闭邮件提醒。</small>
-            </div>
-            <div class="form-group">
-                <label for="checkFrequency">检查频率</label>
-                <div class="input-with-unit">
-                    <input type="number" id="checkFrequency" name="checkFrequency" min="5" max="1440" value="30" aria-describedby="frequency-help">
-                    <span>分钟</span>
-                </div>
-                <small id="frequency-help">设置自动检查剩余电量的时间间隔。</small>
-            </div>
-            <div class="dialog-actions">
-                <button type="button" class="btn btn-ghost" onclick="closeSettings()">取消</button>
-                <button type="submit" class="btn btn-primary">
-                    <span class="spinner" aria-hidden="true"></span>
-                    <span class="btn-text">保存设置</span>
+
+        <div class="settings-layout">
+            <nav id="settingsNav" class="settings-sidebar" aria-label="设置分类">
+                {% set common_pages = [('appearance', '外观'), ('data', '数据与日志'), ('update', '软件更新')] %}
+                {% set pages = ([('room', '宿舍设置')] if setup_needed else [('monitoring', '采集与预警'), ('room', '宿舍信息'), ('email', '邮箱提醒')]) + common_pages %}
+                {% for key, title in pages %}
+                <button class="settings-entry" type="button" data-settings-target="{{ key }}" aria-controls="settings-{{ key }}" onclick="openSettingsPage(this)">
+                    {{ title }}
                 </button>
+                {% endfor %}
+            </nav>
+            <div id="settingsContent" class="settings-content">
+                <h3 id="settingsPageTitle" tabindex="-1"></h3>
+                <section id="settings-room" data-settings-page="room" aria-labelledby="settingsPageTitle" hidden>
+                    {% if setup_needed %}
+                    <button class="btn btn-primary" type="button" onclick="closeSettings(); openSetup()">设置宿舍</button>
+                    {% else %}
+                    <dl class="settings-dorm">
+                        {% for name, value in [('校区', dorm_info.campus), ('公寓', dorm_info.apartment), ('楼层', dorm_info.floor), ('房间号', dorm_info.room)] %}
+                        <div>
+                            <dt>{{ name }}</dt>
+                            <dd>{{ value }}</dd>
+                        </div>
+                        {% endfor %}
+                    </dl>
+                    {% endif %}
+                </section>
+                {% if not setup_needed %}
+                <form id="settings-monitoring" data-settings-page="monitoring" aria-labelledby="settingsPageTitle" novalidate hidden>
+                    <div class="settings-fields">
+                        <div class="form-group">
+                            <label for="threshold">预警阈值</label>
+                            <div class="input-with-unit">
+                                <input type="number" id="threshold" name="threshold" step="any" min="0">
+                                <span>度</span>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="checkFrequency">检查频率</label>
+                            <div class="input-with-unit">
+                                <input type="number" id="checkFrequency" name="check_frequency" min="5" max="1440">
+                                <span>分钟</span>
+                            </div>
+                        </div>
+                    </div>
+                    {{ settings_save() }}
+                </form>
+                <form id="settings-email" data-settings-page="email" aria-labelledby="settingsPageTitle" novalidate hidden>
+                    <div class="form-group">
+                        <label for="emails">收件邮箱</label>
+                        <textarea id="emails" name="emails" rows="2" aria-describedby="emails-help"></textarea>
+                        <small id="emails-help">每行一个，留空则关闭邮件提醒。</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="smtpUsername">发件邮箱</label>
+                        <input id="smtpUsername" name="username" type="email" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="form-group">
+                        <label for="smtpPassword">SMTP 授权码或密码</label>
+                        <input id="smtpPassword" name="password" type="password" autocomplete="new-password" aria-describedby="smtp-password-help">
+                        <small id="smtp-password-help">填写邮箱服务提供的 SMTP 授权码或密码。</small>
+                    </div>
+                    <div class="settings-fields settings-smtp-fields">
+                        <div class="form-group">
+                            <label for="smtpServer">SMTP 服务器</label>
+                            <input id="smtpServer" name="server" type="text" autocomplete="off" spellcheck="false" aria-describedby="smtp-server-help">
+                        </div>
+                        <div class="form-group">
+                            <label for="smtpPort">SMTP 端口</label>
+                            <input id="smtpPort" name="port" type="number" min="1" max="65535" aria-describedby="smtp-server-help">
+                        </div>
+                    </div>
+                    <small id="smtp-server-help" class="settings-email-help">请使用邮箱服务提供的 STARTTLS 服务器和端口。</small>
+                    {{ settings_save() }}
+                </form>
+                {% endif %}
+
+                <section id="settings-update" data-settings-page="update" aria-labelledby="settingsPageTitle" hidden>
+                    <div class="settings-row settings-version">
+                        <div>
+                            <small>当前版本</small>
+                            <strong>{{ app_version or '未知' }}</strong>
+                        </div>
+                        <button type="button" class="btn btn-soft" onclick="openUpdateDialog()">检查更新</button>
+                    </div>
+                    <label class="settings-switch">
+                        <span>
+                            <span id="autoUpdateLabel">自动检查更新</span>
+                            <small id="autoUpdateHelp">每次运行启动脚本时检查。</small>
+                        </span>
+                        <input id="autoUpdateToggle" class="sr-only" type="checkbox" role="switch" aria-labelledby="autoUpdateLabel" aria-describedby="autoUpdateHelp"{% if auto_check_updates %} checked{% endif %}>
+                        <span class="settings-switch-track" aria-hidden="true"></span>
+                    </label>
+                    <p id="autoUpdateStatus" class="update-status text-danger" role="status" hidden></p>
+                </section>
+
+                <section id="settings-appearance" data-settings-page="appearance" aria-labelledby="settingsPageTitle" hidden>
+                    <label class="settings-switch">
+                        <span>
+                            <span id="autoThemeLabel">自动切换深色模式</span>
+                            <small id="autoThemeHelp">随系统切换。手动切换主题会关闭此开关。</small>
+                        </span>
+                        <input id="autoThemeToggle" class="sr-only" type="checkbox" role="switch" aria-labelledby="autoThemeLabel" aria-describedby="autoThemeHelp">
+                        <span class="settings-switch-track" aria-hidden="true"></span>
+                    </label>
+                </section>
+
+                <section id="settings-data" data-settings-page="data" aria-labelledby="settingsPageTitle" hidden>
+                    <section id="logsCard" class="settings-log" aria-labelledby="logsHeading">
+                        <h4 id="logsHeading">系统日志</h4>
+                        <div class="log-controls">
+                            <select id="logLevel" onchange="filterLogs()" aria-label="日志级别">
+                                <option value="all">所有级别</option>
+                                <option value="INFO">信息</option>
+                                <option value="WARNING">警告</option>
+                                <option value="ERROR">错误</option>
+                            </select>
+                            <div class="log-limit">
+                                <input type="number" id="logLimit" value="50" min="10" max="500" step="1" onchange="refreshLogs(event)" aria-label="显示日志条数">
+                                <span aria-hidden="true">条</span>
+                            </div>
+                            <button class="btn btn-soft" type="button" onclick="refreshLogs(event)">
+                                <span class="spinner" aria-hidden="true"></span>
+                                <span class="btn-text">刷新日志</span>
+                            </button>
+                            <button class="btn btn-danger-soft" type="button" onclick="clearLogs(event)">
+                                <span class="spinner" aria-hidden="true"></span>
+                                <span class="btn-text">清空日志</span>
+                            </button>
+                        </div>
+                        <div class="log-container" tabindex="0" aria-label="系统日志内容" role="region">
+                            <div id="log-content" class="log-content">
+                                <div class="log-loading">正在加载日志…</div>
+                            </div>
+                        </div>
+                        <p id="logStatus" class="update-status" role="status" hidden></p>
+                    </section>
+                    <div class="settings-row settings-records">
+                        <div>
+                            <h4>历史记录</h4>
+                            <p class="settings-email-help">清空后将永久删除电量历史和预警记录。</p>
+                        </div>
+                        <button class="btn btn-danger-soft" type="button" onclick="clearAllRecords(event)">
+                            <span class="spinner" aria-hidden="true"></span>
+                            <span class="btn-text">清空全部记录</span>
+                        </button>
+                    </div>
+                </section>
             </div>
-        </form>
+        </div>
     </dialog>
 
     {# 通用确认对话框：替代 window.confirm（无法样式化且会阻塞主线程）。
@@ -458,6 +445,10 @@
         <form method="dialog" class="confirm-form">
             <h2 id="confirmTitle">确认操作</h2>
             <p id="confirmMessage" class="confirm-message"></p>
+            <div id="confirmVerification" class="form-group confirm-verification" hidden>
+                <label for="confirmVerificationInput" id="confirmVerificationLabel"></label>
+                <input id="confirmVerificationInput" type="text" autocomplete="off" spellcheck="false">
+            </div>
             <div class="dialog-actions">
                 <button type="submit" value="cancel" class="btn btn-ghost" autofocus>取消</button>
                 <button type="submit" value="confirm" class="btn btn-danger">确定</button>

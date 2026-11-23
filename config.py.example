@@ -34,6 +34,7 @@ LOW_BALANCE_THRESHOLD = 10.0
 WEB_HOST = "127.0.0.1"  # 仅允许本机回环地址
 WEB_PORT = 5100       # Web服务端口
 DEBUG_MODE = False    # 调试模式（保持False，True会导致调度器重复运行）
+AUTO_CHECK_UPDATES = True  # 每次运行启动脚本时检查软件更新
 
 # 如果使用其他邮箱，请修改对应的SMTP设置：
 # Gmail: smtp.gmail.com, 587

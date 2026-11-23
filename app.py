@@ -20,15 +20,17 @@ from datetime import datetime
 from pathlib import Path
 from threading import Thread
 from time import monotonic, sleep
+from urllib.request import ProxyHandler, build_opener
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from werkzeug.serving import ThreadedWSGIServer
 from config_io import check_frequency_minutes, initial_config, loopback_host, setup_required
 from instance import InstanceAlreadyRunning, active_dashboard_url, register_instance
+from releases import SoftwareUpdates
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
-# 首次启动先加载内存配置，浏览器完成宿舍设置后才落盘。
+# 首次启动先加载内存配置，用户保存设置时再落盘。
 try:
     import config
 except ModuleNotFoundError as exc:
@@ -123,11 +125,18 @@ def open_dashboard(url):
     logging.info("请在浏览器中打开 %s", url)
 
 
-def open_running_dashboard():
+def open_running_dashboard(check_updates=False):
     deadline = monotonic() + 5
     while monotonic() < deadline:
         url = active_dashboard_url(PROJECT_DIR)
         if url:
+            if check_updates:
+                try:
+                    opener = build_opener(ProxyHandler({}))
+                    with opener.open(f'{url}api/update?startup=1', timeout=12):
+                        pass
+                except OSError:
+                    logging.warning('无法通过运行中的仪表盘检查软件更新')
             open_dashboard(url)
             return True
         sleep(0.1)
@@ -145,7 +154,8 @@ def main(registration=None, open_browser=False):
 
     set_monitor(ElectricMonitor())
 
-    app = create_app(monitor, reschedule=setup_scheduler)
+    updates = SoftwareUpdates()
+    app = create_app(monitor, reschedule=setup_scheduler, updates=updates)
     app.debug = getattr(config, 'DEBUG_MODE', False)
     configured_host = getattr(config, 'WEB_HOST', None)
     host = loopback_host(configured_host)
@@ -160,6 +170,8 @@ def main(registration=None, open_browser=False):
         logging.info("定时任务调度器已启动")
         try:
             server.log_startup()
+            if getattr(config, 'AUTO_CHECK_UPDATES', True):
+                updates.start_check()
             if registration is not None:
                 with registration.open('a', encoding='ascii') as handle:
                     handle.write(f'{url}\n')
@@ -185,7 +197,7 @@ def launch():
     except InstanceAlreadyRunning:
         logging.info("本项目的电费监控已在运行")
         if args.open_browser:
-            sys.exit(0 if open_running_dashboard() else 1)
+            sys.exit(0 if open_running_dashboard(check_updates=True) else 1)
 
 
 if __name__ == '__main__':

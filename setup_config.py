@@ -272,6 +272,7 @@ CHECK_FREQUENCY_MINUTES = {check_frequency}
 WEB_HOST = {loopback_host(old.get('WEB_HOST'))!r}
 WEB_PORT = {web_port}
 DEBUG_MODE = False
+AUTO_CHECK_UPDATES = {old.get('AUTO_CHECK_UPDATES', True)!r}
 
 # 预测系统配置
 PREDICTION_ALERT_DAYS = 7

@@ -17,9 +17,11 @@ import config
 import storage
 
 
-def get_recipients():
+def get_recipients(settings=None):
     """解析预警收件人列表（统一使用 ALERT_EMAILS）"""
-    emails = getattr(config, 'ALERT_EMAILS', None)
+    if settings is None:
+        settings = vars(config)
+    emails = settings.get('ALERT_EMAILS')
     if emails:
         return list(emails)
     return []
@@ -32,25 +34,28 @@ def _send(subject, body):
     Returns:
         int: 成功发送的邮件数量
     """
-    recipients = get_recipients()
+    # 同一批邮件使用同一份配置，避免网页保存时混用新旧发件设置。
+    settings = vars(config).copy()
+    recipients = get_recipients(settings)
     if not recipients:
         logging.warning("未配置预警邮箱，跳过邮件发送")
         return 0
 
-    server = smtplib.SMTP(config.EMAIL_SMTP_SERVER, config.EMAIL_SMTP_PORT)
+    sender = settings['EMAIL_USERNAME']
+    server = smtplib.SMTP(settings['EMAIL_SMTP_SERVER'], settings['EMAIL_SMTP_PORT'])
     sent_count = 0
     try:
         server.starttls()
-        server.login(config.EMAIL_USERNAME, config.EMAIL_PASSWORD)
+        server.login(sender, settings['EMAIL_PASSWORD'])
 
         for email in recipients:
             try:
                 msg = MIMEMultipart()
-                msg['From'] = config.EMAIL_USERNAME
+                msg['From'] = sender
                 msg['To'] = email
                 msg['Subject'] = subject
                 msg.attach(MIMEText(body, 'plain', 'utf-8'))
-                server.sendmail(config.EMAIL_USERNAME, email, msg.as_string())
+                server.sendmail(sender, email, msg.as_string())
                 sent_count += 1
                 logging.info(f"预警邮件已发送到: {email}")
             except Exception as e:

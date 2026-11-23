@@ -3,9 +3,10 @@
 """
 Web 层 - 全部 Flask 路由
 
-create_app(monitor, reschedule) 返回配置好的 Flask 应用：
+create_app(monitor, reschedule, updates) 返回配置好的 Flask 应用：
 - monitor: ElectricMonitor 实例（数据采集/预测/统计）
 - reschedule: 配置保存后重新调度定时任务的回调（由 app.py 提供）
+- updates: 服务启动与网页检查共用的软件更新状态
 
 约定：
 - 手动检查与定时检查共用 monitor.run_check，不另写检查逻辑。
@@ -21,6 +22,7 @@ import math
 import os
 import re
 from datetime import datetime
+from ipaddress import IPv6Address
 from threading import Lock
 
 import config
@@ -35,10 +37,11 @@ import releases
 import storage
 
 
-def create_app(monitor, reschedule=None):
+def create_app(monitor, reschedule=None, *, updates=None):
     app = Flask(__name__)
     config_save_lock = Lock()
-    app_version = releases.read_version()
+    if updates is None:
+        updates = releases.SoftwareUpdates()
 
     @app.before_request
     def require_local_host():
@@ -74,12 +77,15 @@ def create_app(monitor, reschedule=None):
                 idx = bisect.bisect_right(curve_ends, record_time) - 1
                 r[4] = curve_cum[idx] if idx >= 0 else 0.0
             records.append(r)
+        setup_needed = setup_required(config)
         return render_template(
             'index.html',
             stats=stats,
             records=records,
-            app_version=app_version,
-            setup_needed=setup_required(config),
+            app_version=updates.current_version,
+            auto_check_updates=getattr(config, 'AUTO_CHECK_UPDATES', True),
+            setup_needed=setup_needed,
+            dorm_info=None if setup_needed else _dorm_info(),
             schedule_label=_schedule_label()
         )
 
@@ -109,7 +115,28 @@ def create_app(monitor, reschedule=None):
     @app.route('/api/update')
     def api_update():
         """按需查询软件正式发布。"""
-        return jsonify(releases.check_for_update(app_version))
+        if request.args.get('startup') == '1':
+            return jsonify(updates.check_on_launch() if getattr(config, 'AUTO_CHECK_UPDATES', True) else {})
+        return jsonify(updates.check())
+
+    @app.route('/api/update/settings', methods=['GET', 'POST'])
+    def api_update_settings():
+        if request.method == 'GET':
+            enabled = getattr(config, 'AUTO_CHECK_UPDATES', True)
+            return jsonify(enabled=enabled, latest_version=updates.available_version() if enabled else None)
+
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get('enabled'), bool):
+            return jsonify(message='无效的自动检查更新设置'), 400
+
+        enabled = data['enabled']
+        try:
+            with config_save_lock:
+                _save_web_config({'AUTO_CHECK_UPDATES': enabled}, reschedule_checks=False)
+        except OSError:
+            logging.exception('保存自动检查更新设置失败')
+            return jsonify(message='无法保存自动检查更新设置，请检查本机配置文件权限。'), 500
+        return jsonify(enabled=enabled)
 
     @app.route('/api/records')
     def api_records():
@@ -179,8 +206,8 @@ def create_app(monitor, reschedule=None):
 
     # ── 配置 API ─────────────────────────────────────────────────
 
-    def _save_web_config(updates):
-        """用同一配置模板保存首次设置和提醒设置。"""
+    def _save_web_config(updates, *, reschedule_checks=True):
+        """用同一配置模板保存网页设置。"""
         values = vars(config) | updates
         config_content = f'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -218,6 +245,7 @@ CHECK_FREQUENCY_MINUTES = {values.get('CHECK_FREQUENCY_MINUTES', check_frequency
 WEB_HOST = {loopback_host(values.get('WEB_HOST'))!r}
 WEB_PORT = {values.get('WEB_PORT', 5100)}
 DEBUG_MODE = {values.get('DEBUG_MODE', False)}
+AUTO_CHECK_UPDATES = {values.get('AUTO_CHECK_UPDATES', True)!r}
 
 # 预测系统配置
 PREDICTION_ALERT_DAYS = {values.get('PREDICTION_ALERT_DAYS', 7)}
@@ -228,7 +256,7 @@ PREDICTION_MIN_SAMPLES = {values.get('PREDICTION_MIN_SAMPLES', 12)}
 PREDICTION_MIN_OBSERVED_DAYS = {values.get('PREDICTION_MIN_OBSERVED_DAYS', 0.5)}
 '''
         vars(config).update(write_config(config.__file__, config_content))
-        if reschedule:
+        if reschedule_checks and reschedule:
             reschedule()
 
     @app.route('/api/setup', methods=['POST'])
@@ -270,8 +298,10 @@ PREDICTION_MIN_OBSERVED_DAYS = {values.get('PREDICTION_MIN_OBSERVED_DAYS', 0.5)}
         try:
             config_data = {
                 'threshold': getattr(config, 'LOW_BALANCE_THRESHOLD', 10.0),
-                'emails': getattr(config, 'ALERT_EMAILS', None) or [],
-                'check_frequency': check_frequency_minutes(config)
+                'emails': [email for email in (getattr(config, 'ALERT_EMAILS', None) or [])
+                           if email not in ('no@email.com', '你的接收邮箱@qq.com')],
+                'check_frequency': check_frequency_minutes(config),
+                'smtp': _smtp_settings(),
             }
             return jsonify({'success': True, 'config': config_data})
         except Exception as e:
@@ -280,55 +310,42 @@ PREDICTION_MIN_OBSERVED_DAYS = {values.get('PREDICTION_MIN_OBSERVED_DAYS', 0.5)}
 
     @app.route('/api/config', methods=['POST'])
     def api_save_config():
-        """保存系统配置API：重新生成 config.py 并即时重新调度定时任务"""
+        """原子保存设置；采集设置变化时重新调度。"""
         try:
             data = request.get_json()
-            if not data:
+            if not isinstance(data, dict) or not data:
                 return jsonify({'success': False, 'message': '无效的配置数据'})
 
-            # 输入健壮性：设置表单带 novalidate，浏览器不拦截非法值；
-            # 清空阈值输入时 JS 的 parseFloat 会产出 NaN → JSON null，
-            # 直接落盘会写成 LOW_BALANCE_THRESHOLD = None，之后所有检查与页面全部崩溃。
+            section = data.get('section')
+            if section not in (None, 'monitoring', 'email'):
+                return jsonify({'success': False, 'message': '无效的设置分类'})
+            if section == 'monitoring' and not {'threshold', 'check_frequency'} <= data.keys():
+                return jsonify({'success': False, 'message': '请填写预警阈值和检查频率'})
+            if section == 'email' and not {'emails', 'smtp'} <= data.keys():
+                return jsonify({'success': False, 'message': '请提供完整的邮箱设置'})
+            save_monitoring = section != 'email'
+            save_email = section != 'monitoring'
+
+            updates = {}
             try:
-                threshold = float(data.get('threshold', 10.0))
-            except (TypeError, ValueError):
-                return jsonify({'success': False, 'message': '无效的预警阈值'})
-            if not math.isfinite(threshold) or threshold < 0:
-                return jsonify({'success': False, 'message': '预警阈值必须是不小于 0 的数字'})
-
-            try:
-                check_frequency = int(data.get('check_frequency', 60))
-            except (TypeError, ValueError):
-                return jsonify({'success': False, 'message': '无效的检查频率'})
-            # 与设置弹窗的 min/max 一致；负值会让 APScheduler 在下次启动时崩溃
-            if not (5 <= check_frequency <= 1440):
-                return jsonify({'success': False, 'message': '检查频率需在 5～1440 分钟之间'})
-
-            emails = data.get('emails', [])
-            if not isinstance(emails, list):
-                return jsonify({'success': False, 'message': '无效的提醒邮箱列表'})
-
-            # 验证邮箱格式
-            valid_emails = []
-            for email in emails:
-                email = str(email).strip()
-                if email and re.match(EMAIL_PATTERN, email):
-                    valid_emails.append(email)
-
-            if emails and not valid_emails:
-                return jsonify({'success': False, 'message': '请填写有效的邮箱地址'})
+                if save_monitoring:
+                    updates.update(_monitoring_updates(data))
+                if save_email:
+                    updates['ALERT_EMAILS'] = _validated_recipients(data.get('emails', []))
+            except ValueError as exc:
+                return jsonify({'success': False, 'message': str(exc)})
 
             with config_save_lock:
                 if setup_required(config):
                     return jsonify({'success': False, 'message': '请先完成宿舍设置'})
-                _save_web_config({
-                    'LOW_BALANCE_THRESHOLD': threshold,
-                    'CHECK_FREQUENCY_MINUTES': check_frequency,
-                    'ALERT_EMAILS': valid_emails,
-                })
+                if save_email and 'smtp' in data:
+                    try:
+                        updates.update(_smtp_updates(data['smtp'], updates['ALERT_EMAILS']))
+                    except ValueError as exc:
+                        return jsonify({'success': False, 'message': str(exc)})
+                _save_web_config(updates, reschedule_checks=save_monitoring)
 
-            logging.info(f"配置已更新 - 阈值: {threshold}度, 邮箱数量: {len(valid_emails)}, 检查频率: {check_frequency}分钟")
-
+            logging.info('配置已更新：%s', section or '采集与邮件')
             return jsonify({'success': True, 'message': '配置保存成功'})
 
         except Exception as e:
@@ -412,7 +429,97 @@ PREDICTION_MIN_OBSERVED_DAYS = {values.get('PREDICTION_MIN_OBSERVED_DAYS', 0.5)}
 
 
 EMAIL_PATTERN = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+SMTP_HOST_LABEL = r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
+SMTP_HOST_PATTERN = rf'(?:{SMTP_HOST_LABEL}\.)*{SMTP_HOST_LABEL}\.?'
 LOG_PATTERN = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - (\w+) - (.+)'
+
+
+def _dorm_info():
+    campus = {'1': '西土城校区', '2': '沙河校区'}
+    apartment = str(getattr(config, 'EXPECTED_APARTMENT_NAME', '') or '').strip()
+    if apartment in ('', '你的公寓名'):
+        apartment_id = str(getattr(config, 'APARTMENT_ID', '')).strip()
+        # 部分旧配置直接用公寓中文名作为查询参数。
+        apartment = apartment_id if re.search(r'[\u3400-\u9fff]', apartment_id) else '未记录'
+    return {
+        'campus': campus.get(str(config.AREA_ID), '未记录'),
+        'apartment': apartment,
+        'floor': str(config.FLOOR_ID).strip(),
+        'room': str(config.ROOM_NUMBER).strip(),
+    }
+
+
+def _monitoring_updates(data):
+    try:
+        threshold = float(data.get('threshold', 10.0))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError('无效的预警阈值') from None
+    if not math.isfinite(threshold) or threshold < 0:
+        raise ValueError('预警阈值必须是不小于 0 的数字')
+
+    try:
+        frequency = int(data.get('check_frequency', 60))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError('无效的检查频率') from None
+    if not 5 <= frequency <= 1440:
+        raise ValueError('检查频率需在 5～1440 分钟之间')
+
+    return {'LOW_BALANCE_THRESHOLD': threshold, 'CHECK_FREQUENCY_MINUTES': frequency}
+
+
+def _validated_recipients(emails):
+    if not isinstance(emails, list):
+        raise ValueError('无效的提醒邮箱列表')
+    addresses = [str(email).strip() for email in emails]
+    valid = [email for email in addresses if re.match(EMAIL_PATTERN, email)]
+    if emails and not valid:
+        raise ValueError('请填写有效的邮箱地址')
+    return valid
+
+
+def _smtp_settings():
+    username = getattr(config, 'EMAIL_USERNAME', '')
+    password = getattr(config, 'EMAIL_PASSWORD', '')
+    return {
+        'username': '' if username in ('no@email.com', '你的邮箱@qq.com') else username,
+        'server': getattr(config, 'EMAIL_SMTP_SERVER', 'smtp.qq.com'),
+        'port': getattr(config, 'EMAIL_SMTP_PORT', 587),
+        'has_password': isinstance(password, str) and password.strip() not in ('', 'no@email.com', '你的邮箱授权码'),
+    }
+
+
+def _smtp_updates(data, recipients):
+    if not isinstance(data, dict) or any(not isinstance(data.get(key), str) for key in ('username', 'server')):
+        raise ValueError('无效的邮箱提醒配置')
+
+    username, server = data['username'].strip(), data['server'].strip()
+    port, password = data.get('port'), data.get('password', '')
+    if not isinstance(password, str):
+        raise ValueError('无效的 SMTP 授权码')
+    if username and (username == 'no@email.com' or not re.fullmatch(EMAIL_PATTERN, username)):
+        raise ValueError('请填写有效的发件邮箱地址')
+    if len(server) > 253 or not re.fullmatch(SMTP_HOST_PATTERN, server):
+        try:
+            IPv6Address(server)
+        except ValueError:
+            raise ValueError('请填写有效的 SMTP 服务器主机名或 IP 地址') from None
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError('SMTP 端口需在 1～65535 之间')
+
+    if not password.strip():
+        saved = _smtp_settings()
+        same_account = username == saved['username'] and server.lower() == str(saved['server']).lower()
+        password = config.EMAIL_PASSWORD if same_account and saved['has_password'] else ''
+    if recipients and (not username or not password):
+        raise ValueError('启用邮箱提醒需填写发件邮箱和 SMTP 授权码')
+
+    return {
+        'EMAIL_USERNAME': username,
+        'EMAIL_PASSWORD': password,
+        'EMAIL_SMTP_SERVER': server,
+        'EMAIL_SMTP_PORT': port,
+    }
+
 
 # 记录状态的中文显示（库内存英文枚举，仅渲染时翻译；未收录的值原样显示）
 STATUS_LABELS = {

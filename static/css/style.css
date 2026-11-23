@@ -41,7 +41,7 @@
         max-width: 100%;
     }
 
-    /* hidden 兜底：.alert-banner / .chart-container / .logs-panel 等显式
+    /* hidden 兜底：.chart-container 等显式
        display 会覆盖 UA 的 [hidden] 规则，导致"默认隐藏"失效（横幅误显示）。
        此处统一让 hidden 属性始终生效，JS 用 el.hidden 切换。 */
     [hidden] {
@@ -115,8 +115,6 @@
         --accent-soft-l: #e2f3f0;
         --accent-line-l: #bfe3dd;
         --on-accent-l: #ffffff;
-        --forecast-a-l: #0a6e60;
-        --forecast-b-l: #0b7f70;
         --meter-free-l: #35b8a2;
         --meter-paid-l: #0b7f70;
         --success-l: #177e4d;
@@ -150,8 +148,6 @@
         --accent-soft-d: #10312b;
         --accent-line-d: #1e4f46;
         --on-accent-d: #06231e;
-        --forecast-a-d: #0c2f29;
-        --forecast-b-d: #11564a;
         --meter-free-d: #3ecfae;
         --meter-paid-d: #1f8f7d;
         --success-d: #3ecf8e;
@@ -227,13 +223,7 @@
         @media (prefers-color-scheme: dark) { --on-accent: var(--on-accent-d); }
         @supports (color: light-dark(white, black)) { --on-accent: light-dark(var(--on-accent-l), var(--on-accent-d)); }
 
-        --forecast-a: var(--forecast-a-l);
-        @media (prefers-color-scheme: dark) { --forecast-a: var(--forecast-a-d); }
-        @supports (color: light-dark(white, black)) { --forecast-a: light-dark(var(--forecast-a-l), var(--forecast-a-d)); }
 
-        --forecast-b: var(--forecast-b-l);
-        @media (prefers-color-scheme: dark) { --forecast-b: var(--forecast-b-d); }
-        @supports (color: light-dark(white, black)) { --forecast-b: light-dark(var(--forecast-b-l), var(--forecast-b-d)); }
 
         --meter-free: var(--meter-free-l);
         @media (prefers-color-scheme: dark) { --meter-free: var(--meter-free-d); }
@@ -318,7 +308,7 @@
     }
 
     @media (prefers-color-scheme: dark) {
-        :root {
+        :root:has(> head > meta[name="color-scheme"][content="light dark"]) {
             --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px rgba(0, 0, 0, 0.36);
             --shadow-md: 0 24px 60px rgba(0, 0, 0, 0.5);
         }
@@ -338,7 +328,7 @@
     .container {
         width: min(1180px, calc(100% - 40px));
         margin-inline: auto;
-        padding-block: 20px 40px;
+        padding-block: 14px 34px;
     }
 
     .topbar {
@@ -355,7 +345,7 @@
     .topbar-inner {
         width: min(1180px, calc(100% - 40px));
         margin-inline: auto;
-        padding-block: 12px;
+        padding-block: 9px;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -371,8 +361,8 @@
 
     .brand-mark {
         display: grid;
-        width: 44px;
-        height: 44px;
+        width: 34px;
+        height: 34px;
         flex: none;
         place-items: center;
         border: 1px solid var(--accent-line);
@@ -394,14 +384,6 @@
         white-space: nowrap;
     }
 
-    .brand-sub {
-        overflow: hidden;
-        color: var(--text-faint);
-        font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
     .topbar-actions {
         display: flex;
         flex: none;
@@ -409,39 +391,23 @@
         gap: 10px;
     }
 
-    .schedule-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 7px 12px;
-        border: 1px solid var(--line);
-        border-radius: var(--radius-pill);
-        background: var(--surface-soft);
-        color: var(--text-soft);
-        font-size: 12px;
-        font-weight: 620;
-        white-space: nowrap;
+    .settings-toggle.btn {
+        min-height: 36px;
+        padding: 5px 11px;
+        gap: 6px;
     }
 
-    .status-dot {
-        width: 7px;
-        height: 7px;
-        flex: none;
-        border-radius: 50%;
-        background: var(--success);
-        box-shadow: 0 0 0 4px color-mix(in oklab, var(--success) 18%, transparent);
-    }
-
-    .status-dot-pending {
-        background: var(--warning);
-        box-shadow: 0 0 0 4px color-mix(in oklab, var(--warning) 18%, transparent);
+    .settings-icon {
+        font-family: "Segoe UI Symbol", sans-serif;
+        font-size: 16px;
+        line-height: 1;
     }
 
     /* 主题切换：当前模式的相反选项可见，另一份 display:none（同时移出无障碍树） */
     .theme-toggle {
         display: inline-grid;
-        width: 40px;
-        height: 40px;
+        width: 36px;
+        height: 36px;
         place-items: center;
         padding: 0;
         border: 1px solid var(--line);
@@ -483,89 +449,128 @@
         color: var(--danger);
     }
 
-    /* 低电量横幅（服务端按阈值渲染；hidden 属性默认隐藏） */
-    .alert-banner {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-        margin-block: 16px 0;
-        padding: 12px 18px;
-        border: 1px solid var(--danger-line);
-        border-radius: var(--radius-md);
-        background: var(--danger-soft);
-        color: var(--danger);
-        font-weight: 650;
-        text-align: center;
-    }
-
-    /* 主卡：剩余电量 + 双池构成 */
+    /* 电量概览 */
     main {
         display: flex;
         flex-direction: column;
-        gap: 16px;
-        margin-top: 16px;
+        gap: 13px;
     }
 
-    .balance-hero {
+    .panel.overview {
+        padding: 12px 20px 0;
+    }
+
+    .overview-toolbar,
+    .overview-status,
+    .overview-actions {
         display: flex;
-        align-items: stretch;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+
+    .overview-toolbar {
         justify-content: space-between;
-        gap: 28px;
-        padding: 26px 28px;
-        border: 1px solid var(--line);
-        border-radius: var(--radius-lg);
-        background:
-            linear-gradient(120deg, var(--accent-soft) 0%, transparent 46%),
-            var(--surface);
-        box-shadow: var(--shadow-sm);
+        gap: 8px 14px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--line);
     }
 
-    .balance-label {
+    .overview-status {
+        gap: 4px 8px;
         color: var(--text-soft);
-        font-size: 13px;
-        font-weight: 650;
-    }
-
-    .balance-value {
-        display: flex;
-        align-items: baseline;
-        gap: 8px;
-        margin-top: 6px;
-    }
-
-    .balance-value strong {
-        font-size: clamp(40px, 6vw, 56px);
-        font-weight: 740;
-        line-height: 1;
-        letter-spacing: -0.045em;
+        font-size: 12px;
         font-variant-numeric: tabular-nums;
     }
 
-    .balance-value small {
+    .overview-status time {
+        color: var(--text);
+        font-weight: 620;
+    }
+
+    .overview-warning {
+        font-weight: 650;
+    }
+
+    .overview-update.btn {
+        min-height: 26px;
+        padding: 2px 8px;
+        font-size: 12px;
+    }
+
+    .overview-actions {
+        gap: 6px;
+    }
+
+    .overview-actions .btn {
+        min-height: 34px;
+        padding: 4px 11px;
+        font-size: 13px;
+    }
+
+    .overview-metrics {
+        display: grid;
+        grid-template-columns: minmax(0, 1.22fr) minmax(0, 1.1fr) repeat(2, minmax(0, 0.9fr));
+        padding-block: 15px;
+    }
+
+    .overview-metric,
+    .overview-detail-grid > div {
+        min-width: 0;
+    }
+
+    .overview-metric + .overview-metric {
+        padding-inline-start: 19px;
+        border-inline-start: 1px solid var(--line);
+    }
+
+    .overview-metric dt,
+    .overview-detail-grid dt {
         color: var(--text-soft);
-        font-size: 15px;
+        font-size: 12px;
+    }
+
+    .overview-value {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0 6px;
+        margin-top: 4px;
+        line-height: 1.15;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .overview-value strong {
+        font-size: clamp(25px, 3.05vw, 35px);
+        font-weight: 740;
+        letter-spacing: -0.04em;
+        overflow-wrap: anywhere;
+    }
+
+    .overview-balance .overview-value strong {
+        font-size: clamp(30px, 3.65vw, 42px);
+    }
+
+    .overview-value small {
+        color: var(--text-soft);
+        font-size: 13px;
         font-weight: 600;
     }
 
-    .balance-note {
-        margin-top: 10px;
+    .overview-note {
+        margin-top: 4px;
         color: var(--text-soft);
-        font-size: 12.5px;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
     }
 
-    .balance-side {
-        display: flex;
-        flex: 0 1 360px;
-        flex-direction: column;
-        justify-content: flex-end;
-        gap: 9px;
-        min-width: 0;
+    .overview-pools {
+        max-width: min(165px, 100%);
+        margin-top: 6px;
     }
 
     .balance-meter {
         display: flex;
-        height: 12px;
+        height: 5px;
         overflow: hidden;
         border-radius: var(--radius-pill);
         background: var(--meter-paid);
@@ -579,20 +584,21 @@
     .meter-legend {
         display: flex;
         flex-wrap: wrap;
-        gap: 6px 16px;
+        gap: 2px 8px;
+        margin-top: 4px;
         color: var(--text-soft);
-        font-size: 12px;
+        font-size: 11px;
     }
 
     .legend-item {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
+        gap: 4px;
     }
 
     .legend-dot {
-        width: 8px;
-        height: 8px;
+        width: 6px;
+        height: 6px;
         flex: none;
         border-radius: 50%;
     }
@@ -605,53 +611,43 @@
         background: var(--meter-paid);
     }
 
-    /* 概览指标卡 */
-    .metrics-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
-        gap: 16px;
+    .overview-details {
+        border-top: 1px solid var(--line);
     }
 
-    .metric-card {
-        min-width: 0;
-        padding: 18px 20px;
-        border: 1px solid var(--line);
-        border-radius: var(--radius-lg);
-        background: var(--surface);
-        box-shadow: var(--shadow-sm);
-    }
-
-    .metric-label {
+    .overview-details summary {
+        width: max-content;
+        padding: 7px 0;
         color: var(--text-soft);
-        font-size: 13px;
-        font-weight: 650;
-    }
-
-    .metric-value {
-        display: flex;
-        align-items: baseline;
-        gap: 6px;
-        margin-top: 8px;
-    }
-
-    .metric-value strong {
-        font-size: clamp(26px, 3vw, 32px);
-        font-weight: 730;
-        line-height: 1;
-        letter-spacing: -0.03em;
-        font-variant-numeric: tabular-nums;
-    }
-
-    .metric-value small {
-        color: var(--text-soft);
-        font-size: 13px;
-        font-weight: 600;
-    }
-
-    .metric-note {
-        margin-top: 9px;
-        color: var(--text-faint);
         font-size: 12px;
+        font-weight: 650;
+        cursor: pointer;
+    }
+
+    .overview-details summary:hover {
+        color: var(--accent-text);
+    }
+
+    .overview-detail-body {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+        padding-bottom: 13px;
+    }
+
+    .overview-detail-grid {
+        display: grid;
+        width: 100%;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 9px 14px;
+    }
+
+    .overview-detail-grid dd {
+        color: var(--text);
+        font-size: 13px;
+        font-weight: 620;
+        overflow-wrap: anywhere;
     }
 
     /* 面板通用 */
@@ -660,13 +656,6 @@
         border: 1px solid var(--line);
         border-radius: var(--radius-lg);
         background: var(--surface);
-        box-shadow: var(--shadow-sm);
-    }
-
-    .dashboard-grid {
-        display: grid;
-        grid-template-columns: minmax(0, 1.55fr) minmax(280px, 1fr);
-        gap: 16px;
     }
 
     .section-heading {
@@ -675,10 +664,6 @@
         justify-content: space-between;
         gap: 16px;
         margin-bottom: 18px;
-    }
-
-    .section-heading.compact {
-        margin-bottom: 14px;
     }
 
     .section-heading h2 {
@@ -692,191 +677,6 @@
         margin-top: 3px;
         color: var(--text-soft);
         font-size: 12.5px;
-    }
-
-    /* 预测面板 */
-    .forecast-summary {
-        display: flex;
-        align-items: flex-end;
-        justify-content: space-between;
-        gap: 24px;
-        min-height: 132px;
-        padding: 22px 24px;
-        border-radius: var(--radius-md);
-        color: #fff;
-        background:
-            radial-gradient(circle at 84% 8%, rgba(255, 255, 255, 0.14), transparent 11rem),
-            linear-gradient(135deg, var(--forecast-a), var(--forecast-b));
-    }
-
-    .forecast-label,
-    .forecast-date span {
-        display: block;
-        color: rgba(255, 255, 255, 0.92);
-        font-size: 12px;
-    }
-
-    .forecast-days {
-        display: block;
-        margin-top: 4px;
-        font-size: clamp(36px, 5vw, 50px);
-        font-weight: 730;
-        line-height: 1;
-        letter-spacing: -0.04em;
-        font-variant-numeric: tabular-nums;
-    }
-
-    .forecast-date {
-        text-align: right;
-    }
-
-    .forecast-date strong {
-        display: block;
-        margin-top: 4px;
-        font-size: 17px;
-        font-variant-numeric: tabular-nums;
-    }
-
-    /* 预测底色恒为深青，语义色在其上取亮色档（位于工具类之后，级联覆盖） */
-    .forecast-summary .text-warning {
-        color: #ffd9a0;
-    }
-
-    .forecast-summary .text-danger {
-        color: #ffb3c0;
-    }
-
-    .prediction-metrics {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 10px;
-        margin-top: 14px;
-    }
-
-    .prediction-item {
-        min-width: 0;
-        padding: 12px 13px;
-        border: 1px solid var(--line);
-        border-radius: var(--radius-md);
-        background: var(--surface-soft);
-    }
-
-    .prediction-label {
-        display: block;
-        overflow: hidden;
-        color: var(--text-faint);
-        font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    .prediction-item strong {
-        display: block;
-        margin-top: 4px;
-        overflow: hidden;
-        font-size: 13.5px;
-        font-weight: 700;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    /* 操作面板 */
-    .actions-panel {
-        display: flex;
-        min-height: 100%;
-        flex-direction: column;
-    }
-
-    .action-list {
-        display: flex;
-        flex: 1;
-        flex-direction: column;
-        gap: 9px;
-    }
-
-    .action-item {
-        position: relative;
-        display: flex;
-        width: 100%;
-        min-height: 56px;
-        padding: 10px 12px;
-        align-items: center;
-        gap: 11px;
-        text-align: start;
-        border: 1px solid var(--line);
-        border-radius: var(--radius-md);
-        background: var(--surface);
-        transition: border-color 160ms ease, background-color 160ms ease;
-    }
-
-    .action-item:hover {
-        border-color: var(--accent-line);
-        background: var(--accent-soft);
-    }
-
-    .action-primary {
-        border-color: var(--accent-line);
-        background: var(--accent-soft);
-    }
-
-    .action-primary:hover {
-        background: var(--accent-soft);
-    }
-
-    .action-symbol {
-        display: grid;
-        width: 34px;
-        height: 34px;
-        flex: 0 0 34px;
-        place-items: center;
-        color: var(--accent-text);
-        border-radius: var(--radius-sm);
-        background: var(--accent-soft);
-        background: color-mix(in oklab, var(--accent-soft) 70%, var(--surface));
-        font-size: 17px;
-        font-weight: 700;
-    }
-
-    .action-primary .action-symbol {
-        color: var(--on-accent);
-        background: var(--accent);
-    }
-
-    .action-copy {
-        display: flex;
-        min-width: 0;
-        flex: 1;
-        flex-direction: column;
-    }
-
-    .action-copy strong {
-        font-size: 13.5px;
-        font-weight: 660;
-    }
-
-    .action-copy small {
-        overflow: hidden;
-        color: var(--text-faint);
-        font-size: 11px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    .danger-link {
-        display: inline-flex;
-        margin-top: 14px;
-        padding: 8px 0;
-        align-items: center;
-        justify-content: center;
-        gap: 7px;
-        color: var(--danger);
-        font-size: 12px;
-        font-weight: 650;
-    }
-
-    .danger-link:hover {
-        text-decoration: underline;
-        text-underline-offset: 3px;
     }
 
     /* 按钮 */
@@ -941,9 +741,7 @@
         background: var(--danger-soft);
     }
 
-    .btn:disabled,
-    .action-item:disabled,
-    .danger-link:disabled {
+    .btn:disabled {
         cursor: not-allowed;
         opacity: 0.58;
     }
@@ -970,6 +768,14 @@
     }
 
     /* 图表面板 */
+    .chart-panel {
+        padding: 13px 15px 15px;
+    }
+
+    .chart-panel .section-heading {
+        margin-bottom: 10px;
+    }
+
     .chart-heading {
         align-items: center;
     }
@@ -1005,11 +811,15 @@
 
     .chart-container {
         position: relative;
-        height: 330px;
+        height: clamp(212px, 24.5vh, 266px);
         overflow: hidden;
         border: 1px solid var(--line);
         border-radius: var(--radius-md);
         background: linear-gradient(180deg, var(--surface), var(--surface-soft));
+    }
+
+    .chart-panel:has([data-chart="all"].active, [data-durange="all"].active) .chart-container {
+        height: clamp(232px, 31vh, 300px);
     }
 
     .chart-history-status {
@@ -1085,17 +895,6 @@
     }
 
     /* 记录表：容器查询驱动，窄容器时折叠为卡片式堆叠布局 */
-    .record-count {
-        display: inline-flex;
-        padding: 6px 11px;
-        color: var(--text-soft);
-        border: 1px solid var(--line);
-        border-radius: var(--radius-pill);
-        background: var(--surface-soft);
-        font-size: 11.5px;
-        white-space: nowrap;
-    }
-
     .table-wrap {
         overflow: auto;
         max-inline-size: 100%;
@@ -1256,13 +1055,15 @@
     /* 日志面板（控制台质感：双主题下恒为深色，子树固定 dark 配色） */
     .log-controls {
         display: grid;
-        grid-template-columns: auto minmax(130px, 180px) 110px auto;
-        gap: 9px;
-        margin-bottom: 12px;
+        grid-template-columns: minmax(94px, 1fr) 86px auto auto;
+        gap: 8px;
+        margin-bottom: 10px;
     }
 
     .log-controls select,
     .log-controls input {
+        width: 100%;
+        min-width: 0;
         min-height: 38px;
         padding: 8px 10px;
         border: 1px solid var(--line-strong);
@@ -1277,8 +1078,26 @@
         border-color: var(--accent);
     }
 
+    .log-limit {
+        position: relative;
+    }
+
+    .log-limit input {
+        padding-inline-end: 23px;
+    }
+
+    .log-limit span {
+        position: absolute;
+        inset-inline-end: 7px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--text-soft);
+        font-size: 11px;
+        pointer-events: none;
+    }
+
     .log-container {
-        max-height: 420px;
+        max-height: min(260px, 38dvh);
         overflow-y: auto;
         border: 1px solid var(--line);
         border-radius: var(--radius-md);
@@ -1287,7 +1106,7 @@
     }
 
     .log-content {
-        padding: 14px;
+        padding: 7px 11px;
         font-family: var(--font-mono);
         font-size: 11.5px;
         line-height: 1.6;
@@ -1325,6 +1144,7 @@
 
     .log-message {
         color: #d5dee3;
+        overflow-wrap: anywhere;
     }
 
     .log-loading,
@@ -1494,6 +1314,273 @@
         margin-top: 22px;
     }
 
+    .settings-dialog {
+        width: min(752px, calc(100vw - 24px));
+        height: min(540px, 88vh);
+        height: min(540px, 88dvh);
+        padding: 0;
+        overflow: hidden;
+    }
+
+    .settings-dialog[open] {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+    }
+
+    .settings-dialog .dialog-header {
+        align-items: center;
+        margin: 0;
+        padding: 13px 18px;
+        border-bottom: 1px solid var(--line);
+    }
+
+    .settings-layout {
+        display: grid;
+        grid-template-columns: 165px minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+    }
+
+    .settings-sidebar {
+        display: grid;
+        align-content: start;
+        gap: 4px;
+        padding: 12px 9px;
+        border-inline-end: 1px solid var(--line);
+        background: var(--surface-soft);
+        overflow-y: auto;
+    }
+
+    .settings-entry {
+        width: 100%;
+        min-height: 42px;
+        padding: 7px 11px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        color: var(--text-soft);
+        text-align: start;
+        font-size: 14px;
+        font-weight: 650;
+        cursor: pointer;
+    }
+
+    .settings-entry:hover,
+    .settings-entry:focus-visible {
+        background: var(--surface);
+        color: var(--text);
+    }
+
+    .settings-entry[aria-current="true"] {
+        border-color: var(--accent-line);
+        background: var(--accent-soft);
+        color: var(--accent-text);
+    }
+
+    .settings-content {
+        min-width: 0;
+        padding: 20px 22px 22px;
+        overflow-y: auto;
+        scrollbar-gutter: stable;
+        overscroll-behavior: contain;
+    }
+
+    .settings-content h3 {
+        margin-bottom: 17px;
+        font-size: 19px;
+        font-weight: 720;
+    }
+
+    .settings-content h4 {
+        margin-bottom: 5px;
+        font-size: 14px;
+        font-weight: 680;
+    }
+
+    .settings-dorm {
+        border: 1px solid var(--line);
+        border-radius: var(--radius-md);
+        background: var(--surface-soft);
+    }
+
+    .settings-dorm > div {
+        display: grid;
+        grid-template-columns: 5em minmax(0, 1fr);
+        gap: 10px;
+        padding: 10px 12px;
+        font-size: 14px;
+    }
+
+    .settings-dorm > div + div {
+        border-top: 1px solid var(--line);
+    }
+
+    .settings-dorm dt {
+        color: var(--text-soft);
+    }
+
+    .settings-dorm dd {
+        font-weight: 650;
+        overflow-wrap: anywhere;
+    }
+
+    .settings-log h4 {
+        margin-bottom: 9px;
+    }
+
+    .settings-records {
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px solid var(--line);
+    }
+
+    @media (max-width: 600px) {
+        .settings-dialog {
+            height: min(560px, 88vh);
+            height: min(560px, 88dvh);
+        }
+
+        .settings-layout {
+            grid-template-columns: minmax(0, 1fr);
+            grid-template-rows: auto minmax(0, 1fr);
+        }
+
+        .settings-sidebar {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            padding: 8px;
+            border-inline-end: 0;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .settings-entry {
+            min-height: 36px;
+            padding: 5px 3px;
+            text-align: center;
+            font-size: 12px;
+        }
+
+        .settings-content {
+            padding: 15px 14px 18px;
+        }
+    }
+
+    .settings-fields {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+    }
+
+    .settings-smtp-fields {
+        grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    }
+
+    .settings-email-help {
+        display: block;
+        color: var(--text-soft);
+        font-size: 12px;
+    }
+
+    .settings-dialog .form-group {
+        margin-bottom: 11px;
+    }
+
+    .settings-dialog .form-group input {
+        min-height: 42px;
+    }
+
+    .settings-dialog .form-group textarea {
+        min-height: 66px;
+    }
+
+    .settings-save {
+        margin-top: 10px;
+    }
+
+    .settings-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 8px;
+    }
+
+    .settings-version {
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-md);
+        background: var(--surface-soft);
+    }
+
+    .settings-version small {
+        display: block;
+        color: var(--text-soft);
+        font-size: 12px;
+    }
+
+    .settings-version strong {
+        font-size: 16px;
+        font-weight: 700;
+    }
+
+    .settings-switch {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 40px;
+        font-size: 13px;
+        font-weight: 650;
+        cursor: pointer;
+    }
+
+    .settings-row + .settings-switch {
+        margin-top: 10px;
+    }
+
+    .settings-switch small {
+        display: block;
+        margin-top: 2px;
+        color: var(--text-soft);
+        font-size: 12px;
+        font-weight: 400;
+    }
+
+    .settings-switch-track {
+        display: flex;
+        align-items: center;
+        flex: 0 0 38px;
+        height: 22px;
+        padding: 3px;
+        border: 1px solid var(--text-faint);
+        border-radius: 999px;
+        background: var(--surface-soft);
+    }
+
+    .settings-switch-track::before {
+        content: "";
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: var(--text-soft);
+    }
+
+    .settings-switch input:checked + .settings-switch-track {
+        justify-content: flex-end;
+        border-color: var(--accent);
+        background: var(--accent);
+    }
+
+    .settings-switch input:checked + .settings-switch-track::before {
+        background: var(--on-accent);
+    }
+
+    .settings-switch input:focus-visible + .settings-switch-track {
+        outline: 2px solid var(--accent-strong);
+        outline-offset: 3px;
+    }
+
+    .form-group.confirm-verification {
+        margin: 14px 0 0;
+    }
+
     .confirm-form h2 {
         font-size: 18px;
         font-weight: 720;
@@ -1585,92 +1672,58 @@
     }
 
     /* 响应式 */
-    @media (max-width: 960px) {
-        .dashboard-grid {
-            grid-template-columns: 1fr;
-        }
-
-        .action-list {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-        }
-
-        .action-update {
-            grid-column: 1 / -1;
-        }
-
-        .danger-link {
-            align-self: end;
-        }
-    }
-
     @media (max-width: 720px) {
         .container,
         .topbar-inner {
             width: calc(100% - 24px);
         }
 
-        .brand-sub {
-            display: none;
-        }
-
         .brand-copy h1 {
             font-size: 16px;
         }
 
-        .brand-mark {
-            width: 38px;
-            height: 38px;
-            font-size: 18px;
-        }
-
-        .schedule-badge {
-            padding: 6px 10px;
-            font-size: 11px;
-        }
-
-        .balance-hero {
-            flex-direction: column;
-            gap: 18px;
-            padding: 22px 20px;
-        }
-
-        .balance-side {
-            flex-basis: auto;
-        }
-
         .panel {
-            padding: 18px;
+            padding: 14px;
         }
 
-        .forecast-summary {
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 14px;
-            min-height: 0;
-            padding: 20px;
+        .panel.overview {
+            padding: 11px 14px 0;
         }
 
-        .forecast-date {
-            text-align: start;
+        .overview-metrics,
+        .overview-detail-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .overview-metrics {
+            gap: 9px 0;
+            padding-block: 11px;
+        }
+
+        .overview-metric + .overview-metric {
+            padding-inline-start: 13px;
+        }
+
+        .overview-metric:nth-child(odd) {
+            padding-inline-start: 0;
+            border-inline-start: 0;
+        }
+
+        .overview-metric:nth-child(n + 3) {
+            padding-top: 8px;
+            border-top: 1px solid var(--line);
         }
 
         .chart-heading {
-            align-items: flex-start;
-            flex-direction: column;
-        }
-
-        .chart-tabs {
-            width: 100%;
+            gap: 8px;
         }
 
         .chart-tab {
-            flex: 1;
-            padding-inline: 6px;
+            padding-inline: 8px;
         }
 
         .chart-container {
-            height: 280px;
+            height: 218px;
         }
 
         .log-controls {
@@ -1682,21 +1735,20 @@
         }
     }
 
-    @media (max-width: 480px) {
-        .metrics-grid {
-            grid-template-columns: 1fr;
+    @media (max-width: 440px) {
+        .topbar-inner,
+        .topbar-actions,
+        .brand-lockup {
+            gap: 8px;
         }
 
-        .action-list {
-            grid-template-columns: 1fr;
+        .chart-tabs {
+            width: 100%;
         }
 
-        .prediction-metrics {
-            grid-template-columns: repeat(2, 1fr);
-        }
-
-        .topbar-actions .schedule-badge {
-            display: none;
+        .chart-tab {
+            flex: 1;
+            padding-inline: 6px;
         }
     }
 

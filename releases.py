@@ -3,6 +3,7 @@
 import logging
 import re
 from pathlib import Path
+from threading import Thread
 
 import requests
 
@@ -11,6 +12,36 @@ REPOSITORY = 'WTYJ/bupt-electricity-monitor'
 RELEASES_URL = f'https://github.com/{REPOSITORY}/releases'
 LATEST_RELEASE_API = f'https://api.github.com/repos/{REPOSITORY}/releases/latest'
 VERSION_FILE = Path(__file__).with_name('VERSION')
+
+
+class SoftwareUpdates:
+    """在服务进程内保留最近一次可比较的版本结果。"""
+
+    def __init__(self):
+        self.current_version = read_version()
+        self.latest_result = {}
+        self.startup_thread = None
+
+    def check(self):
+        result = check_for_update(self.current_version)
+        if 'update_available' in result:
+            self.latest_result = result
+        return result
+
+    def check_on_launch(self):
+        result = self.check()
+        logging.info('软件更新：%s', result['message'])
+        return result
+
+    def start_check(self):
+        self.startup_thread = Thread(target=self.check_on_launch, daemon=True)
+        self.startup_thread.start()
+
+    def available_version(self):
+        if self.startup_thread is not None:
+            self.startup_thread.join(timeout=10)
+        result = self.latest_result
+        return result.get('latest_version') if result.get('update_available') else None
 
 
 def _parse_version(tag):
@@ -61,5 +92,7 @@ def check_for_update(current_version):
 
     return {
         'message': message,
+        'latest_version': latest_version,
+        'update_available': current is not None and latest > current,
         'release_url': f'{RELEASES_URL}/tag/{latest_version}',
     }

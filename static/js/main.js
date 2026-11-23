@@ -8,34 +8,52 @@ let chartHistoryFailed = false;
 const chartInspectors = new Map();
 const chartRangeStorageKey = 'electricity-chart-ranges';
 
+function readBrowserSetting(key) {
+    try {
+        return localStorage.getItem(key);
+    } catch {
+        return null;
+    }
+}
+
+function saveBrowserSetting(key, value) {
+    try {
+        if (value === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, value);
+    } catch {
+        // 存储不可用时保留当前页面的状态。
+    }
+}
+
 // ── 主题（color-scheme meta 方案）─────────────────────────────
 // 三态数据模型：localStorage 无值 = 跟随系统；'light'/'dark' = 手动固定。
 // CSS 通过 :root:has(head meta[content=...]) 跟随 meta；light-dark() token
 // 随 color-scheme 自动切换，因此主题切换只需要改 meta。
 function storedColorScheme() {
-    try {
-        const v = localStorage.getItem('color-scheme');
-        return (v === 'light' || v === 'dark') ? v : null;
-    } catch (e) { return null; }
+    const scheme = readBrowserSetting('color-scheme');
+    return scheme === 'light' || scheme === 'dark' ? scheme : null;
 }
 
+const systemColorScheme = window.matchMedia('(prefers-color-scheme: dark)');
+let colorScheme = storedColorScheme();
+
 function systemScheme() {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    return systemColorScheme.matches ? 'dark' : 'light';
 }
 
 // 当前实际渲染的模式：手动覆盖优先，否则跟随系统
 function resolvedScheme() {
-    return storedColorScheme() ?? systemScheme();
+    return colorScheme ?? systemScheme();
 }
 
 function applyColorScheme() {
-    const stored = storedColorScheme();
+    const scheme = resolvedScheme();
     const meta = document.querySelector('meta[name="color-scheme"]');
-    if (meta) meta.content = stored ?? 'light dark';
+    if (meta) meta.content = colorScheme ?? 'light dark';
     // data-scheme 只服务"颜色以外"的分支（切换按钮显示哪个图标/文案）
-    document.documentElement.dataset.scheme = resolvedScheme();
+    document.documentElement.dataset.scheme = scheme;
     const metaTheme = document.querySelector('meta[name="theme-color"]');
-    if (metaTheme) metaTheme.setAttribute('content', resolvedScheme() === 'dark' ? '#0d1417' : '#f2f5f6');
+    if (metaTheme) metaTheme.content = scheme === 'dark' ? '#0d1417' : '#f2f5f6';
 }
 
 // 页面加载完成后初始化
@@ -59,7 +77,7 @@ document.addEventListener('DOMContentLoaded', function() {
     bindChartInteractions();
     restoreChartRanges();
     updateSampleFreshness();
-    loadSettings();
+    loadUpdateStatus();
 
     const setupForm = document.getElementById('setupForm');
     if (setupForm) {
@@ -67,49 +85,9 @@ document.addEventListener('DOMContentLoaded', function() {
         openSetup();
     }
 
-    // 设置表单提交（与首屏初始化共用同一个 DOMContentLoaded 监听）
-    const settingsForm = document.getElementById('settingsForm');
-    if (settingsForm) {
-        settingsForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-
-            const btn = this.querySelector('button[type="submit"]');
-            setButtonLoading(btn, true);
-
-            const formData = {
-                threshold: parseFloat(document.getElementById('threshold').value),
-                emails: document.getElementById('emails').value.split('\n').filter(email => email.trim()),
-                check_frequency: parseInt(document.getElementById('checkFrequency').value)
-            };
-
-            fetch('/api/config', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(formData)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showAlert('设置保存成功，页面即将刷新！', 'success');
-                    // 保存后整页刷新，让阈值/横幅/预测面板立即反映新配置
-                    setTimeout(() => {
-                        location.reload();
-                    }, 1000);
-                } else {
-                    showAlert(data.message || '保存失败', 'error');
-                }
-            })
-            .catch(error => {
-                console.error('保存设置失败:', error);
-                showAlert('保存失败，请稍后重试', 'error');
-            })
-            .finally(() => {
-                setButtonLoading(btn, false);
-            });
-        });
-    }
+    document.querySelectorAll('form[data-settings-page]').forEach(form => {
+        form.addEventListener('submit', submitSettings);
+    });
 });
 
 function openSetup() {
@@ -181,30 +159,55 @@ function getActionElement(event) {
 // 原生 <dialog> 提供 top layer / 焦点圈定 / Esc；confirmDialog 的 close
 // 事件里读取 returnValue 并复位（指南要求，避免旧值串场）。
 const confirmDialog = document.getElementById('confirmDialog');
+const confirmButton = confirmDialog?.querySelector('[value="confirm"]');
+const confirmVerification = document.getElementById('confirmVerification');
+const confirmVerificationLabel = document.getElementById('confirmVerificationLabel');
+const confirmVerificationInput = document.getElementById('confirmVerificationInput');
 let confirmResolver = null;
+let confirmWord = '';
+
+function matchesConfirmation() {
+    return !confirmWord || confirmVerificationInput?.value.trim() === confirmWord;
+}
 
 if (confirmDialog) {
+    confirmVerificationInput?.addEventListener('input', () => {
+        confirmButton.disabled = !matchesConfirmation();
+    });
+    confirmVerificationInput?.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.isComposing) event.preventDefault();
+    });
     confirmDialog.addEventListener('close', () => {
-        const value = confirmDialog.returnValue;
+        const confirmed = confirmDialog.returnValue === 'confirm' && matchesConfirmation();
         confirmDialog.returnValue = ''; // 复位：Esc 关闭不带值，浏览器对旧值行为不一
         const resolve = confirmResolver;
         confirmResolver = null;
-        if (resolve) resolve(value === 'confirm');
+        confirmWord = '';
+        if (confirmVerificationInput) confirmVerificationInput.value = '';
+        if (resolve) resolve(confirmed);
     });
 }
 
-// options: { title, message, confirmText } → Promise<boolean>
+// verificationWord 用于需要输入指定文字的操作。
 function confirmAction(options = {}) {
-    const { title = '确认操作', message = '', confirmText = '确定' } = options;
+    const { title = '确认操作', message = '', confirmText = '确定', verificationWord = '' } = options;
     if (!confirmDialog) {
-        return Promise.resolve(window.confirm(message)); // 极端兜底
+        return Promise.resolve(!verificationWord && window.confirm(message));
     }
-    if (confirmDialog.open) return Promise.resolve(false);
+    if (confirmDialog.open || confirmResolver || (verificationWord && !confirmVerificationInput)) {
+        return Promise.resolve(false);
+    }
 
     document.getElementById('confirmTitle').textContent = title;
     document.getElementById('confirmMessage').textContent = message;
-    const confirmBtn = confirmDialog.querySelector('[value="confirm"]');
-    if (confirmBtn) confirmBtn.textContent = confirmText;
+    confirmWord = verificationWord;
+    if (confirmVerificationInput) {
+        confirmVerification.hidden = !verificationWord;
+        confirmVerificationInput.value = '';
+        confirmVerificationLabel.textContent = verificationWord ? `输入「${verificationWord}」确认` : '';
+    }
+    confirmButton.textContent = confirmText;
+    confirmButton.disabled = !matchesConfirmation();
 
     return new Promise((resolve) => {
         confirmResolver = resolve;
@@ -247,7 +250,7 @@ function refreshPrediction(event) {
     fetch('/api/prediction')
         .then(response => response.json())
         .then(data => {
-            const rendered = document.getElementById('last-update').textContent.trim();
+            const rendered = document.getElementById('last-update').dateTime;
             if (data.sample_time && data.sample_time !== rendered) {
                 location.reload();
                 return;
@@ -294,27 +297,18 @@ function updatePredictionDisplay(prediction) {
     document.getElementById('prediction-observed').textContent =
         (observedDays !== null && observedDays !== undefined) ? observedDays + '天' : '--';
 
-    // 更新预计剩余天数
+    // 更新预计剩余天数和预警日期。
     const daysElement = document.getElementById('prediction-days');
-    if (prediction.days_remaining !== null && prediction.days_remaining !== undefined) {
-        daysElement.textContent = prediction.days_remaining.toFixed(1) + '天';
-
-        // 根据剩余天数设置颜色
-        daysElement.className = 'forecast-days';
-        if (prediction.days_remaining <= 3) {
-            daysElement.classList.add('text-danger');
-        } else if (prediction.days_remaining <= 7) {
-            daysElement.classList.add('text-warning');
-        }
-    } else {
-        daysElement.textContent = '--';
-        daysElement.className = 'forecast-days';
-    }
-
-    // 更新预计到达日期
+    const days = prediction.days_remaining;
+    const hasDays = Number.isFinite(days);
+    daysElement.textContent = hasDays ? days.toFixed(1) : '--';
+    daysElement.classList.toggle('text-danger', hasDays && days <= 3);
+    daysElement.classList.toggle('text-warning', hasDays && days > 3 && days <= 7);
+    document.getElementById('prediction-unit').hidden = !hasDays;
     document.getElementById('prediction-date').textContent = prediction.predicted_date || '--';
+    document.getElementById('prediction-date-row').hidden = !prediction.predicted_date;
 
-    // 更新预测方式与可信度（合成一格显示，避免 prediction-metrics 网格出现半行）
+    // 更新预测方式与可信度。
     const methodElement = document.getElementById('prediction-method');
     if (methodElement) {
         methodElement.textContent = predictionMethodLabel(prediction);
@@ -340,8 +334,9 @@ function predictionMethodLabel(prediction) {
 async function clearAllRecords(event) {
     if (!(await confirmAction({
         title: '清空全部历史记录',
-        message: '将删除全部历史检查记录，此操作不可恢复。确定继续吗？',
-        confirmText: '清空',
+        message: '全部电费历史和预警记录将被永久删除。',
+        confirmText: '清空全部记录',
+        verificationWord: '清空',
     }))) {
         return;
     }
@@ -399,31 +394,181 @@ async function deleteRecord(recordId, event) {
 
 // 打开设置模态框（原生 dialog：焦点圈定 / Esc / 焦点归还均由浏览器处理）
 function openSettings() {
-    const modal = document.getElementById('settingsModal');
-    if (modal && !modal.open) modal.showModal();
-    loadSettings();
+    if (settingsModal.open) return;
+    const selected = settingsNav.querySelector('[aria-current="true"]') ?? settingsNav.firstElementChild;
+    openSettingsPage(selected);
+    settingsModal.showModal();
 }
 
-// 关闭设置模态框
+const settingsModal = document.getElementById('settingsModal');
+const settingsNav = document.getElementById('settingsNav');
+const settingsContent = document.getElementById('settingsContent');
+const settingsPageTitle = document.getElementById('settingsPageTitle');
+let settingsLoad;
+let settingsSaving = false;
+
+settingsModal.addEventListener('close', () => {
+    if (settingsModal.open) return;
+    settingsLoad?.abort();
+    const password = document.getElementById('smtpPassword');
+    if (password) password.value = '';
+});
+
 function closeSettings() {
-    const modal = document.getElementById('settingsModal');
-    if (modal && modal.open) modal.close();
+    if (settingsModal.open) settingsModal.close();
 }
 
-function loadSettings() {
-    fetch('/api/config')
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                document.getElementById('threshold').value = data.config.threshold ?? 10.00;
-                document.getElementById('emails').value = (data.config.emails || []).join('\n');
-                document.getElementById('checkFrequency').value = data.config.check_frequency || 30;
-            }
-        })
-        .catch(error => {
-            console.error('加载设置失败:', error);
-        });
+function openSettingsPage(trigger) {
+    const previous = settingsNav.querySelector('[aria-current="true"]');
+    if (previous === trigger && settingsModal.open) return;
+    settingsLoad?.abort();
+    if (previous) {
+        previous.removeAttribute('aria-current');
+        const previousPage = document.getElementById(previous.getAttribute('aria-controls'));
+        previousPage.hidden = true;
+        if (previousPage.elements?.password) previousPage.elements.password.value = '';
+    }
+
+    const page = document.getElementById(trigger.getAttribute('aria-controls'));
+    trigger.setAttribute('aria-current', 'true');
+    page.hidden = false;
+    settingsPageTitle.textContent = trigger.textContent.trim();
+    settingsContent.scrollTop = 0;
+    if (settingsModal.open) settingsPageTitle.focus({ preventScroll: true });
+    if (page instanceof HTMLFormElement) loadSettings(page);
+    if (page.dataset.settingsPage === 'data') refreshLogs(null);
 }
+
+async function loadSettings(form) {
+    settingsLoad?.abort();
+    const controller = new AbortController();
+    settingsLoad = controller;
+    const button = form.querySelector('button[type="submit"]');
+    const status = form.querySelector('[data-settings-status]');
+    button.disabled = true;
+    status.hidden = true;
+    try {
+        const response = await fetch('/api/config', { cache: 'no-store', signal: controller.signal });
+        const data = await response.json();
+        if (!data.success) throw new Error('Settings request failed');
+        const { threshold, emails, check_frequency, smtp } = data.config;
+        const fields = form.elements;
+        if (form.dataset.settingsPage === 'monitoring') {
+            fields.threshold.value = threshold ?? 10;
+            fields.check_frequency.value = check_frequency || 30;
+        } else {
+            fields.emails.value = (emails || []).join('\n');
+            fields.username.value = smtp.username ?? '';
+            fields.server.value = smtp.server ?? '';
+            fields.port.value = smtp.port ?? '';
+            fields.password.value = '';
+            document.getElementById('smtp-password-help').textContent = smtp.has_password
+                ? '已保存，留空保留。更换发件邮箱或服务器时请重新填写。'
+                : '填写邮箱服务提供的 SMTP 授权码或密码。';
+        }
+        button.disabled = false;
+    } catch {
+        if (controller.signal.aborted) return;
+        status.textContent = '加载设置失败，请切换分类后重试。';
+        status.classList.add('text-danger');
+        status.hidden = false;
+    }
+}
+
+async function submitSettings(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    if (settingsSaving || button.disabled || form.hidden) return;
+    const status = form.querySelector('[data-settings-status]');
+    const fields = form.elements;
+    const section = form.dataset.settingsPage;
+    const payload = section === 'monitoring'
+        ? { section, threshold: fields.threshold.valueAsNumber, check_frequency: fields.check_frequency.valueAsNumber }
+        : {
+            section,
+            emails: fields.emails.value.split('\n').filter(email => email.trim()),
+            smtp: {
+                username: fields.username.value,
+                password: fields.password.value,
+                server: fields.server.value,
+                port: fields.port.valueAsNumber,
+            },
+        };
+
+    settingsSaving = true;
+    status.hidden = true;
+    setButtonLoading(button, true);
+    try {
+        const response = await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!data.success) {
+            status.textContent = data.message || '保存失败。';
+        } else {
+            if (fields.password) fields.password.value = '';
+            status.textContent = '设置已保存，页面即将刷新。';
+            status.classList.remove('text-danger');
+            status.hidden = false;
+            setTimeout(() => location.reload(), 1000);
+            return;
+        }
+    } catch {
+        status.textContent = '保存失败，请稍后重试。';
+    }
+    status.classList.add('text-danger');
+    status.hidden = false;
+    settingsSaving = false;
+    setButtonLoading(button, false);
+}
+
+const autoUpdateToggle = document.getElementById('autoUpdateToggle');
+const availableUpdate = document.getElementById('availableUpdate');
+let latestAvailableVersion;
+
+function renderAvailableUpdate() {
+    const visible = autoUpdateToggle.checked && latestAvailableVersion;
+    availableUpdate.hidden = !visible;
+    availableUpdate.textContent = visible ? `发现新版本 ${latestAvailableVersion}` : '';
+}
+
+async function loadUpdateStatus() {
+    try {
+        const response = await fetch('/api/update/settings', { cache: 'no-store' });
+        if (!response.ok) return;
+        const data = await response.json();
+        latestAvailableVersion = data.latest_version;
+        renderAvailableUpdate();
+    } catch {
+        // 保留现有提示，仍可手动检查更新。
+    }
+}
+
+autoUpdateToggle.addEventListener('change', async () => {
+    const enabled = autoUpdateToggle.checked;
+    const status = document.getElementById('autoUpdateStatus');
+    autoUpdateToggle.disabled = true;
+    status.hidden = true;
+    try {
+        const response = await fetch('/api/update/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+        });
+        if (!response.ok) throw new Error('Update preference save failed');
+        if (enabled) loadUpdateStatus();
+    } catch {
+        autoUpdateToggle.checked = !enabled;
+        status.textContent = '自动检查更新设置保存失败，请重试。';
+        status.hidden = false;
+    } finally {
+        autoUpdateToggle.disabled = false;
+        renderAvailableUpdate();
+    }
+});
 
 function openUpdateDialog() {
     document.getElementById('updateDialog').showModal();
@@ -446,6 +591,10 @@ async function checkForUpdates() {
         if (!response.ok) throw new Error('Update request failed');
         const data = await response.json();
         status.textContent = data.message;
+        if (typeof data.update_available === 'boolean') {
+            latestAvailableVersion = data.update_available ? data.latest_version : null;
+            renderAvailableUpdate();
+        }
         if (data.release_url) {
             releaseLink.href = data.release_url;
             releaseLink.hidden = false;
@@ -1154,8 +1303,8 @@ setInterval(() => {
     fetch('/api/version')
         .then(response => response.json())
         .then(v => {
-            const rendered = ((document.getElementById('last-update') || {}).textContent || '').trim();
-            if (v.version && rendered && v.version !== rendered) {
+            const rendered = document.getElementById('last-update').dateTime;
+            if (v.version && v.version !== rendered) {
                 location.reload();
             }
         })
@@ -1163,25 +1312,6 @@ setInterval(() => {
 }, 60000); // 1分钟
 
 // 日志相关函数
-
-// 切换日志显示
-function toggleLogs(event) {
-    const logsCard = document.getElementById('logsCard');
-    const btn = getActionElement(event);
-    const btnText = btn ? btn.querySelector('.btn-text') : null;
-
-    if (logsCard.hidden) {
-        logsCard.hidden = false;
-        if (btnText) btnText.textContent = '隐藏日志';
-        refreshLogs(null);
-
-        // 滚动到日志模块
-        logsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    } else {
-        logsCard.hidden = true;
-        if (btnText) btnText.textContent = '查看日志';
-    }
-}
 
 // 刷新日志
 async function refreshLogs(event) {
@@ -1236,7 +1366,7 @@ function displayLogs(logs) {
     logContent.innerHTML = logHtml;
 
     // 日志按最新在前渲染，保持在顶部即可看到最新条目
-    logContent.scrollTop = 0;
+    logContent.parentElement.scrollTop = 0;
 }
 
 // 过滤日志
@@ -1256,6 +1386,8 @@ async function clearLogs(event) {
 
     const btn = getActionElement(event);
     if (btn) setButtonLoading(btn, true);
+    const status = document.getElementById('logStatus');
+    status.hidden = true;
 
     try {
         const response = await fetch('/api/logs', {
@@ -1264,17 +1396,19 @@ async function clearLogs(event) {
 
         const data = await response.json();
 
+        status.classList.toggle('text-danger', !data.success);
         if (data.success) {
-            showAlert('日志已清空', 'success');
-            document.getElementById('log-content').innerHTML =
-                '<div class="log-empty">暂无日志记录</div>';
+            status.textContent = '日志已清空。';
+            displayLogs([]);
         } else {
-            showAlert('清空日志失败: ' + (data.message || '未知错误'), 'error');
+            status.textContent = data.message || '清空日志失败。';
         }
     } catch (error) {
         console.error('清空日志失败:', error);
-        showAlert('网络错误，清空日志失败', 'error');
+        status.textContent = '网络错误，清空日志失败。';
+        status.classList.add('text-danger');
     } finally {
+        status.hidden = false;
         if (btn) setButtonLoading(btn, false);
     }
 }
@@ -1293,39 +1427,37 @@ function escapeHtml(text) {
 
 // ── 主题切换（三态：跟随系统 / 固定浅色 / 固定深色）──────────
 const themeToggle = document.getElementById('theme-toggle');
-if (themeToggle) {
+const autoThemeToggle = document.getElementById('autoThemeToggle');
+
+function refreshTheme() {
+    autoThemeToggle.checked = colorScheme === null;
     applyColorScheme();
-
-    themeToggle.addEventListener('click', () => {
-        // 目标 = 当前渲染模式的相反面（用户意图是"切换我看到的"，而非"反转系统默认"）
-        const target = resolvedScheme() === 'dark' ? 'light' : 'dark';
-        try {
-            if (target === systemScheme()) {
-                // 目标与系统偏好一致 = 用户在撤销手动覆盖：删除存储值，
-                // 之后的系统切换（如白天/黑夜自动切换）能继续生效
-                localStorage.removeItem('color-scheme');
-            } else {
-                localStorage.setItem('color-scheme', target);
-            }
-        } catch (e) { /* 存储被禁用时仅本次会话生效 */ }
-        applyColorScheme();
-        drawCharts(); // canvas 不随 CSS 自动变色，需显式重绘
-    });
-
-    // 系统偏好变化：无手动覆盖时立即跟随
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-        applyColorScheme();
-        drawCharts();
-    });
-
-    // 其他标签页改了主题：同步（storage 事件在本标签页不触发）
-    window.addEventListener('storage', (e) => {
-        if (e.key === 'color-scheme' || e.key === null) {
-            applyColorScheme();
-            drawCharts();
-        }
-    });
+    drawCharts(); // canvas 不随 CSS 自动变色。
 }
+
+function setColorScheme(scheme) {
+    colorScheme = scheme;
+    saveBrowserSetting('color-scheme', scheme);
+    refreshTheme();
+}
+
+autoThemeToggle.checked = colorScheme === null;
+applyColorScheme();
+autoThemeToggle.addEventListener('change', () => {
+    setColorScheme(autoThemeToggle.checked ? null : resolvedScheme());
+});
+themeToggle.addEventListener('click', () => {
+    setColorScheme(resolvedScheme() === 'dark' ? 'light' : 'dark');
+});
+systemColorScheme.addEventListener('change', () => {
+    if (colorScheme === null) refreshTheme();
+});
+window.addEventListener('storage', event => {
+    if (event.key === 'color-scheme' || event.key === null) {
+        colorScheme = storedColorScheme();
+        refreshTheme();
+    }
+});
 
 // ── closedby 渐进增强 ────────────────────────────────────────
 // settingsModal 标了 closedby="any"（点击外部可关）。不支持 closedby 的
